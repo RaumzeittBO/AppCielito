@@ -2,7 +2,11 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     match /users/{uid}/{allPaths=**} {
-      allow read, write: if request.auth != null && request.auth.uid == "__OWNER_UID__" && request.auth.uid == uid;
+      allow read: if request.auth != null && request.auth.uid == "4iftAGoQawabSz1EEpKufdPQccC2" && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == "4iftAGoQawabSz1EEpKufdPQccC2" && request.auth.uid == uid
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if request.auth != null && request.auth.uid == "4iftAGoQawabSz1EEpKufdPQccC2" && request.auth.uid == uid;
     }
   }
 }

@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc, type Unsubscribe } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc, writeBatch, type Unsubscribe } from 'firebase/firestore';
 import { db } from './firebase';
 
 const arrays = ['products', 'customers', 'orders', 'expenses', 'incomes'] as const;
@@ -76,4 +76,19 @@ export async function persistOwnerData(uid: string, value: CloudData) {
     ...value.categories.map(name => setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() })),
     setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }),
   ]);
+}
+
+/** Remove a single owner record explicitly; persistOwnerData is intentionally additive. */
+export async function deleteOwnerRecord(uid: string, bucket: Bucket, recordId: string) {
+  if (!arrays.includes(bucket)) throw new Error('Colección no permitida.');
+  if (!db) throw new Error('Firestore no está configurado.');
+  await deleteDoc(doc(db, 'users', uid, bucket, recordId));
+}
+
+export async function deleteOwnerProduct(uid: string, recordId: string, imageId?: string) {
+  if (!db) throw new Error('Firestore no está configurado.');
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'users', uid, 'products', recordId));
+  if (imageId) batch.delete(doc(db, 'users', uid, 'images', imageId));
+  await batch.commit();
 }

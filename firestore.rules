@@ -14,7 +14,8 @@ service cloud.firestore {
       return data.id == recordId && data.updatedAt is timestamp && (
         (bucket == 'products' && boundedText(data, 'name', 100)
           && data.price is number && data.price >= 0
-          && data.cost is number && data.cost >= 0 && data.active is bool)
+          && data.cost is number && data.cost >= 0 && data.active is bool
+          && data.get('imageId', '') is string && data.get('imageId', '').size() <= 100)
         || (bucket == 'customers' && boundedText(data, 'name', 120)
           && boundedText(data, 'phone', 40))
         || (bucket == 'orders' && boundedText(data, 'customer', 120)
@@ -30,7 +31,8 @@ service cloud.firestore {
         || (bucket == 'devices' && boundedText(data, 'token', 4096)
           && boundedText(data, 'platform', 512))
         || (bucket == 'settings' && recordId == 'business'
-          && boundedText(data, 'name', 120))
+          && boundedText(data, 'name', 120)
+          && data.get('logoImageId', '') is string && data.get('logoImageId', '').size() <= 100)
       );
     }
     match /users/{uid}/{bucket}/{recordId} {
@@ -46,6 +48,25 @@ service cloud.firestore {
       // Read-only compatibility path for one-time migration from the old local sync format.
       allow read: if owner(uid);
       allow write: if false;
+    }
+    match /users/{uid}/images/{imageId} {
+      function validImage() {
+        let data = request.resource.data;
+        return data.keys().hasOnly(['id', 'kind', 'mimeType', 'bytes', 'size', 'width', 'height', 'updatedAt'])
+          && data.id == imageId
+          && data.kind in ['dish', 'logo']
+          && data.mimeType in ['image/webp', 'image/jpeg']
+          && data.bytes is bytes
+          && data.bytes.size() > 0
+          && data.bytes.size() <= 204800
+          && data.size == data.bytes.size()
+          && data.width is int && data.width > 0 && data.width <= 640
+          && data.height is int && data.height > 0 && data.height <= 640
+          && data.updatedAt is timestamp;
+      }
+      allow read: if owner(uid);
+      allow create, update: if owner(uid) && validImage();
+      allow delete: if owner(uid);
     }
   }
 }

@@ -3,7 +3,7 @@ import { db } from './firebase';
 
 const arrays = ['products', 'customers', 'orders', 'expenses', 'incomes'] as const;
 type Bucket = typeof arrays[number];
-type CloudData = { products: unknown[]; customers: unknown[]; orders: unknown[]; expenses: unknown[]; incomes: unknown[]; categories: string[]; business: string };
+type CloudData = { products: unknown[]; customers: unknown[]; orders: unknown[]; expenses: unknown[]; incomes: unknown[]; categories: string[]; business: string; businessLogoId?: string };
 
 function rows(bucket: Bucket, values: unknown[]) {
   return values.flatMap((value, index) => {
@@ -47,7 +47,8 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
   const businessRef = doc(firestore, 'users', uid, 'settings', 'business');
   const businessSnapshot = await getDoc(businessRef);
   values.business = businessSnapshot.exists() ? String(businessSnapshot.get('name') || '') : String(legacy.business || local.business);
-  if (!businessSnapshot.exists()) await setDoc(businessRef, { name: values.business, updatedAt: serverTimestamp() });
+  values.businessLogoId = businessSnapshot.exists() ? String(businessSnapshot.get('logoImageId') || '') || undefined : local.businessLogoId;
+  if (!businessSnapshot.exists()) await setDoc(businessRef, { name: values.business, ...(values.businessLogoId ? { logoImageId: values.businessLogoId } : {}), updatedAt: serverTimestamp() });
   onData(values);
 
   const unsubscribers: Unsubscribe[] = [];
@@ -61,7 +62,7 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
     onData({ categories: snapshot.docs.map(item => String(item.get('name'))) });
   }, () => onStatus(false)));
   unsubscribers.push(onSnapshot(businessRef, snapshot => {
-    if (snapshot.exists()) onData({ business: String(snapshot.get('name') || '') });
+    if (snapshot.exists()) onData({ business: String(snapshot.get('name') || ''), businessLogoId: String(snapshot.get('logoImageId') || '') || undefined });
   }, () => onStatus(false)));
   onStatus(true);
   return () => unsubscribers.forEach(unsubscribe => unsubscribe());
@@ -73,6 +74,6 @@ export async function persistOwnerData(uid: string, value: CloudData) {
   await Promise.all([
     ...arrays.flatMap(bucket => rows(bucket, value[bucket]).map(row => setDoc(doc(firestore, 'users', uid, bucket, String(row.id)), { ...row, updatedAt: serverTimestamp() }))),
     ...value.categories.map(name => setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() })),
-    setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, updatedAt: serverTimestamp() }),
+    setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }),
   ]);
 }

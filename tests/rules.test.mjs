@@ -60,6 +60,39 @@ test('Firestore protege las imágenes y limita tipo, dimensiones y bytes', async
   }));
 });
 
+test('Firestore permite guardar categorías y actualizar el logo del negocio con su esquema real', async () => {
+  const owner = env.authenticatedContext(ownerUid).firestore();
+  const other = env.authenticatedContext('otra-cuenta').firestore();
+  const category = doc(owner, `users/${ownerUid}/categories/${encodeURIComponent('Ingredientes')}`);
+  const business = doc(owner, `users/${ownerUid}/settings/business`);
+  const logo = doc(owner, `users/${ownerUid}/images/logo-audit`);
+
+  await assertSucceeds(setDoc(category, { name: 'Ingredientes', updatedAt: serverTimestamp() }));
+  await assertSucceeds(setDoc(business, { name: 'Cielito', updatedAt: serverTimestamp() }));
+  await assertFails(setDoc(doc(other, `users/${ownerUid}/settings/business`), { name: 'Intruso', updatedAt: serverTimestamp() }));
+
+  await assertSucceeds(setDoc(logo, {
+    id: 'logo-audit', kind: 'logo', mimeType: 'image/webp', bytes: Bytes.fromUint8Array(Uint8Array.from([1, 2, 3])),
+    size: 3, width: 320, height: 180, updatedAt: serverTimestamp(),
+  }));
+  const attachLogo = writeBatch(owner);
+  attachLogo.update(business, { logoImageId: 'logo-audit', updatedAt: serverTimestamp() });
+  await assertSucceeds(attachLogo.commit());
+  assert.equal((await getDoc(business)).get('logoImageId'), 'logo-audit');
+});
+
+test('Firestore permite registrar tokens FCM solamente con identidad y timestamp válidos', async () => {
+  const owner = env.authenticatedContext(ownerUid).firestore();
+  const deviceId = encodeURIComponent('token-device-audit');
+  const device = doc(owner, `users/${ownerUid}/devices/${deviceId}`);
+  await assertSucceeds(setDoc(device, {
+    id: deviceId, token: 'token-device-audit', platform: 'test browser', updatedAt: serverTimestamp(),
+  }));
+  await assertFails(setDoc(doc(owner, `users/${ownerUid}/devices/invalid-id`), {
+    id: 'different-id', token: 'token-device-audit', platform: 'test browser', updatedAt: serverTimestamp(),
+  }));
+});
+
 test('La referencia a la imagen se cambia o elimina sin borrar otros datos del producto', async () => {
   const owner = env.authenticatedContext(ownerUid).firestore();
   const product = doc(owner, `users/${ownerUid}/products/with-image`);

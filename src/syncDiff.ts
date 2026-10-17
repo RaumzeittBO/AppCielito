@@ -1,9 +1,19 @@
 export type SyncRecord = { id: string; updatedAt?: unknown; [field: string]: unknown };
 export type RecordDelta<T extends SyncRecord> = { upsert: T[]; remove: string[] };
 
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, stableValue(child)]));
+  }
+  return value;
+}
+
 function comparable(record: SyncRecord) {
   const { updatedAt: _updatedAt, ...data } = record;
-  return JSON.stringify(data);
+  return JSON.stringify(stableValue(data));
 }
 
 /** Return only changed documents so unrelated historical records are never rewritten. */

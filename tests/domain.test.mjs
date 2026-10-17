@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getBalance, getDateRange, paymentTotals, validPayment } from '../src/domain.ts';
+import { getBalance, getDateRange, paymentTotals, roundCurrency, sumCurrency, validPayment } from '../src/domain.ts';
 import { diffRecords } from '../src/syncDiff.ts';
 
 test('la sincronización de productos escribe solo el cambio y no reescribe registros antiguos', () => {
-  const old = [{ id: 'legacy', name: 'Antiguo', price: 20, updatedAt: 'timestamp previo' }];
-  const next = [...old, { id: 'new', name: 'Nuevo', price: 35 }];
+  const old = [{ id: 'legacy', name: 'Antiguo', price: 20, updatedAt: 'timestamp previo', metadata: { source: 'local', active: true } }];
+  const next = [{ metadata: { active: true, source: 'local' }, price: 20, name: 'Antiguo', id: 'legacy', updatedAt: 'timestamp reciente' }, { id: 'new', name: 'Nuevo', price: 35 }];
   assert.deepEqual(diffRecords(old, next), { upsert: [{ id: 'new', name: 'Nuevo', price: 35 }], remove: [] });
 });
 
@@ -31,6 +31,9 @@ test('el saldo y los abonos respetan el total pendiente', () => {
   assert.equal(validPayment(100, 40, 60.01), false);
   assert.equal(validPayment(100, 40, 0), false);
   assert.equal(validPayment(100, 40, Number.NaN), false);
+  assert.equal(validPayment(0.3, 0.1, 0.2), true);
+  assert.equal(sumCurrency([0.1, 0.2]), 0.3);
+  assert.equal(roundCurrency(1.005), 1.01);
 });
 
 test('los filtros generan rangos locales de semana y mes', () => {

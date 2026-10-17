@@ -7,11 +7,12 @@ import {
   Search, Settings, ShoppingBasket, Trash2, Utensils, Wallet, X,
 } from 'lucide-react';
 import { auth, authReady, db, firebaseConfigured } from './firebase';
-import { deleteOwnerProduct, deleteOwnerRecord, hydrateOwnerData, persistOwnerData } from './cloudData';
+import { deleteOwnerProduct, hydrateOwnerData, persistOwnerData } from './cloudData';
 import { readImageDataUrl } from './managedImages';
 import { CloudImage } from './ManagedImageUi';
 import { MoreScreen } from './MoreScreen';
-import { getBalance, getDateRange, paymentTotals, validPayment, type Payment, type PaymentMethod } from './domain';
+import { getBalance, getDateRange, paymentTotals, roundCurrency, sumCurrency, validPayment, type Payment, type PaymentMethod } from './domain';
+import { useBodyScrollLock } from './useBodyScrollLock';
 import './style.css';
 
 type Product = { id: string; name: string; price: number; cost: number; active: boolean; imageId?: string };
@@ -35,25 +36,6 @@ const seed: Data = {
 };
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(new Date());
 
-function useBodyScrollLock(locked: boolean) {
-  useEffect(() => {
-    if (!locked) return;
-    const body = document.body;
-    const scrollY = window.scrollY;
-    const previous = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow };
-    body.style.position = 'fixed';
-    body.style.top = `-${scrollY}px`;
-    body.style.width = '100%';
-    body.style.overflow = 'hidden';
-    return () => {
-      body.style.position = previous.position;
-      body.style.top = previous.top;
-      body.style.width = previous.width;
-      body.style.overflow = previous.overflow;
-      window.scrollTo(0, scrollY);
-    };
-  }, [locked]);
-}
 const money = (value: number) => `Bs ${Number(value || 0).toFixed(2)}`;
 const uid = () => crypto.randomUUID();
 function load(): Data {
@@ -78,6 +60,8 @@ function App() {
   const [syncReady, setSyncReady] = useState(!db);
   const [checkoutOrderId, setCheckoutOrderId] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
+
+  useBodyScrollLock(Boolean(modal));
 
   useEffect(() => { localStorage.setItem('cielito-data', JSON.stringify(data)); }, [data]);
   useEffect(() => {
@@ -121,11 +105,22 @@ function App() {
     // Hydration deliberately runs once per authenticated owner session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
-  const update = (next: Data) => {
-    if (db && user && !syncReady) { ping('Espera a que termine la sincronización para guardar.'); return; }
-    const previous = data;
+  const update = async (next: Data): Promise<boolean> => {
+    if (db && user) {
+      if (!syncReady) { ping('Espera a que termine la sincronización para guardar.'); return false; }
+      try {
+        await persistOwnerData(user.uid, next, data);
+        setCloud(true);
+      } catch (error) {
+        console.error('[Cielito] Falló la sincronización de cambios.', error);
+        setCloud(false);
+        const code = (error as { code?: string }).code;
+        ping(code === 'permission-denied' ? 'Firebase rechazó el cambio por permisos.' : 'No se pudo sincronizar. Revisa tu conexión.');
+        return false;
+      }
+    }
     setData(next);
-    if (db && user) void persistOwnerData(user.uid, next, previous).then(() => setCloud(true)).catch(error => { console.error('[Cielito] Falló la sincronización de cambios.', error); setCloud(false); ping('No se pudo sincronizar. Revisa tu conexión.'); });
+    return true;
   };
   const ping = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2800); };
 
@@ -156,24 +151,25 @@ function App() {
     ['Inicio', Home], ['Vender', ShoppingBasket], ['Pedidos', ClipboardList], ['Dinero', Wallet], ['Más', Menu],
   ] as const;
 
-  const addOrder = (customer: string, items: Line[], date: string, time: string, payments: Payment[], note: string) => {
-    if (!items.length) return;
-    const total = items.reduce((sum, item) => sum + item.qty * item.price, 0);
-    const paid = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    if (paid > total || paid < 0) { ping('El pago supera el total del pedido.'); return; }
+  const addOrder = async (customer: string, items: Line[], date: string, time: string, payments: Payment[], note: string) => {
+    if (!items.length) return false;
+    const total = sumCurrency(items.map(item => item.qty * item.price));
+    const paid = sumCurrency(payments.map(payment => payment.amount));
+    if (paid > total || paid < 0) { ping('El pago supera el total del pedido.'); return false; }
     const order: Order = { id: uid(), customer, date, time, createdAt: new Date().toISOString(), items, total, paid, payments, status: 'Pendiente', method: paymentLabel(payments, paid, total), note };
-    update({ ...data, orders: [order, ...data.orders] });
+    if (!await update({ ...data, orders: [order, ...data.orders] })) return false;
     setCheckoutOrderId(order.id); setModal('saved'); setPage('Pedidos');
+    return true;
   };
-  const addCustomer = (name: string, phone: string) => {
+  const addCustomer = async (name: string, phone: string): Promise<Customer | undefined> => {
     const customer = { id: uid(), name, phone };
-    update({ ...data, customers: [customer, ...data.customers] });
+    if (!await update({ ...data, customers: [customer, ...data.customers] })) return undefined;
     return customer;
   };
-  const markDone = (id: string) => { update({ ...data, orders: data.orders.map(order => order.id === id ? { ...order, status: 'Entregado' } : order) }); ping('Pedido marcado como entregado'); };
-  const saveExpense = (value: Expense) => {
+  const markDone = async (id: string): Promise<boolean> => { const saved = await update({ ...data, orders: data.orders.map(order => order.id === id ? { ...order, status: 'Entregado' } : order) }); if (saved) ping('Pedido marcado como entregado'); return saved; };
+  const saveExpense = async (value: Expense) => {
     const exists = data.expenses.some(expense => expense.id === value.id);
-    update({ ...data, expenses: exists ? data.expenses.map(expense => expense.id === value.id ? value : expense) : [value, ...data.expenses] });
+    if (!await update({ ...data, expenses: exists ? data.expenses.map(expense => expense.id === value.id ? value : expense) : [value, ...data.expenses] })) return;
     setModal(''); ping(exists ? 'Gasto actualizado' : 'Gasto guardado');
   };
   const install = () => { if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => ping('No se pudo instalar ahora.')); ping('Usa “Añadir a pantalla de inicio” en el menú del navegador.'); };
@@ -200,32 +196,31 @@ function App() {
         {page === 'Inicio' && <HomeScreen date={selectedDate} setDate={setSelectedDate} orders={ordersToday} pending={pending} collected={collected} due={due} onSell={() => setPage('Vender')} onExpense={() => setModal('expense')} onOpen={id => setModal(`detail:${id}`)} onDone={markDone} onHistory={() => setPage('Pedidos')}/>}
         {page === 'Vender' && <Sell products={data.products.filter(product => product.active)} customers={data.customers} uid={user?.uid} onSave={addOrder} onCustomer={addCustomer}/>}
         {page === 'Pedidos' && <History data={data} date={selectedDate} setDate={setSelectedDate} onNew={() => setPage('Vender')} onOpen={id => setModal(`detail:${id}`)}/>}
-        {page === 'Dinero' && <Money data={data} onExpense={() => setModal('expense')} onIncome={() => setModal('income')} onEditExpense={id => setModal(`expense:${id}`)} onDeleteExpense={id => { if (window.confirm('¿Eliminar este gasto? Esta acción no se puede deshacer.')) void (async () => { try { if (user) await deleteOwnerRecord(user.uid, 'expenses', id); update({ ...data, expenses: data.expenses.filter(expense => expense.id !== id) }); ping('Gasto eliminado'); } catch { ping('No se pudo eliminar. Comprueba la conexión.'); } })(); }}/>}
+        {page === 'Dinero' && <Money data={data} onExpense={() => setModal('expense')} onIncome={() => setModal('income')} onEditExpense={id => setModal(`expense:${id}`)} onDeleteExpense={async id => { if (window.confirm('¿Eliminar este gasto? Esta acción no se puede deshacer.') && await update({ ...data, expenses: data.expenses.filter(expense => expense.id !== id) })) ping('Gasto eliminado'); }}/ >}
         {page === 'Más' && <MoreScreen products={data.products} customers={data.customers} business={data.business} businessLogoId={data.businessLogoId} uid={user?.uid}
-          onAddProduct={(name, price, cost) => update({ ...data, products: [{ id: uid(), name, price, cost, active: true }, ...data.products] })}
+          onAddProduct={async (name, price, cost) => update({ ...data, products: [{ id: uid(), name, price, cost, active: true }, ...data.products] })}
           onEditProduct={edited => update({ ...data, products: data.products.map(product => product.id === edited.id ? edited : product) })}
-          onDeleteProduct={async (id, imageId) => { if (user) await deleteOwnerProduct(user.uid, id, imageId); update({ ...data, products: data.products.filter(product => product.id !== id) }); }}
+          onDeleteProduct={async (id, imageId) => { if (user) { await deleteOwnerProduct(user.uid, id, imageId); setCloud(true); } setData(current => ({ ...current, products: current.products.filter(product => product.id !== id) })); }}
           onToggleProduct={id => update({ ...data, products: data.products.map(product => product.id === id ? { ...product, active: !product.active } : product) })}
           soldProductIds={new Set(data.orders.flatMap(order => order.items.map(item => item.productId)))}
-          onAddCustomer={(name, phone) => { addCustomer(name, phone); }} onSaveBusiness={business => update({ ...data, business })}
-          onProductImageSaved={(id, imageId) => update({ ...data, products: data.products.map(product => product.id === id ? { ...product, imageId } : product) })}
-          onProductImageDeleted={id => update({ ...data, products: data.products.map(product => { if (product.id !== id) return product; const { imageId: _imageId, ...rest } = product; return rest; }) })}
-          onBusinessLogoSaved={businessLogoId => update({ ...data, businessLogoId })} onBusinessLogoDeleted={() => update({ ...data, businessLogoId: undefined })}
+          onAddCustomer={async (name, phone) => Boolean(await addCustomer(name, phone))} onSaveBusiness={business => update({ ...data, business })}
+          onProductImageSaved={(id, imageId) => { setData(current => ({ ...current, products: current.products.map(product => product.id === id ? { ...product, imageId } : product) })); setCloud(true); }}
+          onProductImageDeleted={id => { setData(current => ({ ...current, products: current.products.map(product => { if (product.id !== id) return product; const { imageId: _imageId, ...rest } = product; return rest; }) })); setCloud(true); }}
+          onBusinessLogoSaved={businessLogoId => { setData(current => ({ ...current, businessLogoId })); setCloud(true); }} onBusinessLogoDeleted={() => { setData(current => ({ ...current, businessLogoId: undefined })); setCloud(true); }}
           onToast={ping} onInstall={install} onLogout={() => auth && void signOut(auth)}/>}
       </div>
     </main>
     <nav className="mobile-nav">{nav.map(([name, Icon]) => <button className={page === name ? 'active' : ''} key={name} onClick={() => setPage(name)}><Icon size={20}/><span>{name}</span></button>)}</nav>
     {updateReady && <div className="update-banner" role="status"><span>Hay una versión nueva lista. Actualiza cuando termines lo que estás haciendo.</span><button onClick={() => window.location.reload()}>Actualizar</button></div>}
-    {(modal === 'expense' || modal === 'income' || modal.startsWith('expense:')) && <ExpenseModal categories={modal === 'income' ? ['Venta adicional', 'Otro'] : data.categories} expense={modal.startsWith('expense:') ? data.expenses.find(item => item.id === modal.split(':')[1]) : undefined} income={modal === 'income'} onCategory={category => update({ ...data, categories: data.categories.includes(category) ? data.categories : [...data.categories, category] })} onClose={() => setModal('')} onSave={value => saveExpense(value)} onIncomeSave={(amount, category, date, note) => { update({ ...data, incomes: [{ id: uid(), amount, category, date, note }, ...data.incomes] }); setModal(''); ping('Ingreso guardado'); }}/>}
-    {modal.startsWith('detail:') && <OrderDetail order={data.orders.find(order => order.id === modal.split(':')[1])} data={data} uid={user?.uid} onClose={() => setModal('')} onDone={markDone} onUpdate={order => { update({ ...data, orders: data.orders.map(item => item.id === order.id ? order : item) }); ping('Pedido actualizado'); }} onAddPayment={(id, amount, method) => {
-      update({ ...data, orders: data.orders.map(order => {
-        if (order.id !== id) return order;
-        if (!validPayment(order.total, order.paid, amount)) { ping(`El saldo disponible es ${money(getBalance(order.total, order.paid))}.`); return order; }
-        const payment: Payment = { id: uid(), amount, method, date: new Date().toISOString() };
-        const payments = [...(order.payments || []), payment]; const paid = payments.reduce((sum, item) => sum + item.amount, 0);
-        return { ...order, payments, paid, method: paymentLabel(payments, paid, order.total) };
-      }) }); ping('Abono registrado');
-    }} onCancel={id => { if (window.confirm('¿Cancelar este pedido? Se conservará en el historial.')) { update({ ...data, orders: data.orders.map(order => order.id === id ? { ...order, status: 'Cancelado' } : order) }); setModal(''); ping('Pedido cancelado'); } }} onReceipt={order => void shareReceipt(order, data.business, data.businessLogoId, user?.uid, paperWidth())}/>}
+    {(modal === 'expense' || modal === 'income' || modal.startsWith('expense:')) && <ExpenseModal categories={modal === 'income' ? ['Venta adicional', 'Otro'] : data.categories} expense={modal.startsWith('expense:') ? data.expenses.find(item => item.id === modal.split(':')[1]) : undefined} income={modal === 'income'} onCategory={category => update({ ...data, categories: data.categories.includes(category) ? data.categories : [...data.categories, category] })} onClose={() => setModal('')} onSave={saveExpense} onIncomeSave={async (amount, category, date, note) => { if (await update({ ...data, incomes: [{ id: uid(), amount, category, date, note }, ...data.incomes] })) { setModal(''); ping('Ingreso guardado'); return true; } return false; }}/ >}
+    {modal.startsWith('detail:') && <OrderDetail order={data.orders.find(order => order.id === modal.split(':')[1])} data={data} uid={user?.uid} onClose={() => setModal('')} onDone={markDone} onUpdate={async order => { if (await update({ ...data, orders: data.orders.map(item => item.id === order.id ? order : item) })) { ping('Pedido actualizado'); return true; } return false; }} onAddPayment={async (id, amount, method) => {
+      const order = data.orders.find(item => item.id === id);
+      if (!order || !validPayment(order.total, order.paid, amount)) { ping(`El saldo disponible es ${money(getBalance(order?.total || 0, order?.paid || 0))}.`); return false; }
+      const payment: Payment = { id: uid(), amount, method, date: new Date().toISOString() };
+      const payments = [...(order.payments || []), payment]; const paid = sumCurrency(payments.map(item => item.amount));
+      if (await update({ ...data, orders: data.orders.map(item => item.id === id ? { ...item, payments, paid, method: paymentLabel(payments, paid, order.total) } : item) })) { ping('Abono registrado'); return true; }
+      return false;
+    }} onCancel={async id => { if (window.confirm('¿Cancelar este pedido? Se conservará en el historial.') && await update({ ...data, orders: data.orders.map(order => order.id === id ? { ...order, status: 'Cancelado' } : order) })) { setModal(''); ping('Pedido cancelado'); } }} onReceipt={order => void shareReceipt(order, data.business, data.businessLogoId, user?.uid, paperWidth())}/>}
     {modal === 'saved' && <div className="modal-backdrop" role="presentation"><div className="modal saved-modal" role="dialog" aria-modal="true"><div className="success-mark"><Check size={24}/></div><div className="eyebrow">PEDIDO GUARDADO</div><h2>Listo, ya está anotado</h2><p>Elige qué quieres hacer ahora.</p><div className="saved-actions"><button className="primary wide" onClick={() => { const order = data.orders.find(item => item.id === checkoutOrderId); if (order) void shareReceipt(order, data.business, data.businessLogoId, user?.uid, paperWidth()); }}>Compartir recibo</button><button className="secondary wide" onClick={() => { const order = data.orders.find(item => item.id === checkoutOrderId); if (order) printReceipt(order, data.business, data.businessLogoId, user?.uid, paperWidth()); }}>Imprimir</button><button className="secondary wide" onClick={() => { setModal(''); setPage('Vender'); }}>Nuevo pedido</button><button className="text-button wide" onClick={() => setModal(`detail:${checkoutOrderId}`)}>Ver pedido <ChevronRight size={16}/></button></div><button className="modal-close" onClick={() => setModal('')} aria-label="Cerrar"><X/></button></div></div>}
     {toast && <div className="toast" role="status"><Check size={17}/>{toast}</div>}
   </div>;
@@ -266,7 +261,7 @@ function OrderRow({ order, onOpen, onDone }: { order: Order; onOpen: () => void;
   return <article className="order-row"><button className="order-main" onClick={onOpen}><span className="order-time">{order.time || 'Sin hora'}<small>{order.date === today() ? 'Hoy' : formatReadableDate(order.date)}</small></span><span className="order-info"><b>{order.customer || 'Venta sin cliente'}</b><small>{order.items.map(item => `${item.qty} × ${item.name}`).join(' · ')}</small></span><span className="order-status"><span className={`badge ${late ? 'late' : order.status === 'Entregado' ? 'done' : ''}`}>{late ? 'Atrasado' : order.status}</span><b>{money(order.total)}</b><small>{balance ? `${money(balance)} pendiente` : 'Pagado'}</small></span></button>{order.status === 'Pendiente' && <button className="done-button" onClick={onDone}><Check size={16}/><span>Entregado</span></button>}</article>;
 }
 
-function Sell({ products, customers, uid: ownerUid, onSave, onCustomer }: { products: Product[]; customers: Customer[]; uid?: string; onSave: (customer: string, items: Line[], date: string, time: string, payments: Payment[], note: string) => void; onCustomer: (name: string, phone: string) => Customer }) {
+function Sell({ products, customers, uid: ownerUid, onSave, onCustomer }: { products: Product[]; customers: Customer[]; uid?: string; onSave: (customer: string, items: Line[], date: string, time: string, payments: Payment[], note: string) => Promise<boolean>; onCustomer: (name: string, phone: string) => Promise<Customer | undefined> }) {
   const [cart, setCart] = useState<Line[]>([]);
   const [search, setSearch] = useState('');
   const [cartOpen, setCartOpen] = useState(false);
@@ -278,31 +273,38 @@ function Sell({ products, customers, uid: ownerUid, onSave, onCustomer }: { prod
   const [newClient, setNewClient] = useState(false);
   const [clientName, setClientName] = useState('');
   const [phone, setPhone] = useState('');
+  const [customerSaving, setCustomerSaving] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [paymentMode, setPaymentMode] = useState<'Pendiente' | 'Efectivo' | 'QR / transferencia' | 'Mixto'>('Pendiente');
   const [cash, setCash] = useState('');
   const [qr, setQr] = useState('');
   const [error, setError] = useState('');
   useBodyScrollLock(cartOpen);
-  const total = cart.reduce((sum, item) => sum + item.qty * item.price, 0);
+  const total = sumCurrency(cart.map(item => item.qty * item.price));
   const count = cart.reduce((sum, item) => sum + item.qty, 0);
   const cashAmount = paymentMode === 'Efectivo' ? Number(cash) : paymentMode === 'Mixto' ? Number(cash || 0) : 0;
   const qrAmount = paymentMode === 'QR / transferencia' ? Number(qr) : paymentMode === 'Mixto' ? Number(qr || 0) : 0;
-  const paid = cashAmount + qrAmount;
+  const paid = roundCurrency(cashAmount + qrAmount);
   const balance = getBalance(total, paid);
   const add = (product: Product) => setCart(current => {
     const found = current.find(item => item.productId === product.id);
     return found ? current.map(item => item.productId === product.id ? { ...item, qty: item.qty + 1 } : item) : [...current, { productId: product.id, name: product.name, qty: 1, price: product.price, cost: product.cost }];
   });
   const setQty = (id: string, qty: number) => setCart(current => current.map(item => item.productId === id ? { ...item, qty } : item).filter(item => item.qty > 0));
-  const submit = () => {
+  const submit = async () => {
     setError('');
+    if (saving) return;
     const payments: Payment[] = [];
     if (paymentMode !== 'Pendiente' && paid <= 0) { setError('Indica el monto recibido o elige “Pendiente”.'); return; }
     if (cashAmount > 0) payments.push({ id: uid(), amount: cashAmount, method: 'Efectivo', date: new Date().toISOString() });
     if (qrAmount > 0) payments.push({ id: uid(), amount: qrAmount, method: 'QR / transferencia', date: new Date().toISOString() });
     if (paid > total) { setError('El monto recibido supera el total. Ajusta el efectivo o el QR.'); return; }
     if (!cart.length) { setError('Agrega al menos un plato.'); return; }
-    onSave(customer, cart, date, time, payments, note);
+    setSaving(true);
+    try {
+      if (!await onSave(customer, cart, date, time, payments, note)) setError('No se pudo guardar el pedido. Revisa la conexión y vuelve a intentarlo.');
+      else setCartOpen(false);
+    } finally { setSaving(false); }
   };
   return <>
     <div className="page-title sell-title"><div><div className="eyebrow">VENTA RÁPIDA</div><h1>Elige los platos</h1><p>Toca un plato para agregarlo al pedido.</p></div></div>
@@ -315,16 +317,16 @@ function Sell({ products, customers, uid: ownerUid, onSave, onCustomer }: { prod
     {cart.length > 0 && <button className="cart-dock" onClick={() => setCartOpen(true)}><span className="cart-dock-count">{count}</span><span className="cart-dock-copy"><b>{count} {count === 1 ? 'plato' : 'platos'}</b><small>Ver y completar el pedido</small></span><b>{money(total)}</b><span className="cart-dock-cta">Ver carrito <ChevronRight size={18}/></span></button>}
     {cartOpen && <div className="checkout-backdrop"><section className="checkout-sheet" role="dialog" aria-modal="true" aria-labelledby="checkout-title"><header className="checkout-header"><button className="back-button" onClick={() => setCartOpen(false)} aria-label="Volver al catálogo"><ArrowLeft size={21}/></button><div><div className="eyebrow">REVISIÓN DEL PEDIDO</div><h2 id="checkout-title">Tu carrito <span>{count}</span></h2></div><button className="icon-button" onClick={() => setCartOpen(false)} aria-label="Cerrar"><X/></button></header>
       <div className="checkout-body"><section className="checkout-items">{cart.map(item => <div className="cart-line" key={item.productId}><div className="cart-item-copy"><b>{item.name}</b><small>{money(item.price)} cada uno</small></div><div className="qty"><button aria-label={`Quitar uno de ${item.name}`} onClick={() => setQty(item.productId, item.qty - 1)}><Minus size={16}/></button><b>{item.qty}</b><button aria-label={`Agregar uno de ${item.name}`} onClick={() => setQty(item.productId, item.qty + 1)}><Plus size={16}/></button></div><strong>{money(item.price * item.qty)}</strong><button className="remove-line" aria-label={`Eliminar ${item.name}`} onClick={() => setQty(item.productId, 0)}><Trash2 size={17}/></button></div>)}
-        <div className="customer-section"><label className="form-label">Cliente<select value={customer} onChange={event => setCustomer(event.target.value)}><option value="">Venta sin cliente</option>{customers.map(item => <option key={item.id} value={item.name}>{item.name}{item.phone ? ` · ${item.phone}` : ''}</option>)}</select></label>{newClient ? <div className="quick-client"><input aria-label="Nombre del cliente" placeholder="Nombre" value={clientName} onChange={event => setClientName(event.target.value)}/><input aria-label="Teléfono opcional" placeholder="Teléfono (opcional)" inputMode="tel" value={phone} onChange={event => setPhone(event.target.value)}/><div><button className="secondary" onClick={() => setNewClient(false)}>Cancelar</button><button className="primary" disabled={!clientName.trim()} onClick={() => { if (!clientName.trim()) return; const added = onCustomer(clientName.trim(), phone.trim()); setCustomer(added.name); setClientName(''); setPhone(''); setNewClient(false); }}>Guardar cliente</button></div></div> : <button className="add-client" onClick={() => setNewClient(true)}><Plus size={16}/>Cliente nuevo</button>}</div>
+        <div className="customer-section"><label className="form-label">Cliente<select value={customer} onChange={event => setCustomer(event.target.value)}><option value="">Venta sin cliente</option>{customers.map(item => <option key={item.id} value={item.name}>{item.name}{item.phone ? ` · ${item.phone}` : ''}</option>)}</select></label>{newClient ? <div className="quick-client"><input aria-label="Nombre del cliente" placeholder="Nombre" value={clientName} onChange={event => setClientName(event.target.value)}/><input aria-label="Teléfono opcional" placeholder="Teléfono (opcional)" inputMode="tel" value={phone} onChange={event => setPhone(event.target.value)}/><div><button type="button" className="secondary" disabled={customerSaving} onClick={() => setNewClient(false)}>Cancelar</button><button type="button" className="primary" disabled={customerSaving || !clientName.trim()} onClick={() => { if (!clientName.trim() || customerSaving) return; setCustomerSaving(true); void onCustomer(clientName.trim(), phone.trim()).then(added => { if (added) { setCustomer(added.name); setClientName(''); setPhone(''); setNewClient(false); } }).finally(() => setCustomerSaving(false)); }}>{customerSaving ? 'Guardando…' : 'Guardar cliente'}</button></div></div> : <button type="button" className="add-client" onClick={() => setNewClient(true)}><Plus size={16}/>Cliente nuevo</button>}</div>
         <div className="delivery-fields delivery-schedule"><label className="form-label">Fecha de entrega<input type="date" value={date} onChange={event => setDate(event.target.value)}/></label><label className="form-label">Hora <small>Opcional</small><input type="time" value={time} onChange={event => setTime(event.target.value)}/></label></div>
-        <button className="disclosure" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><span>Nota para la cocina <small>Opcional</small></span><ChevronDown className={advanced ? 'rotated' : ''} size={18}/></button>{advanced && <label className="form-label note-input">Notas<input value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. sin picante"/></label>}
+        <button type="button" className="disclosure" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}><span>Nota para la cocina <small>Opcional</small></span><ChevronDown className={advanced ? 'rotated' : ''} size={18}/></button>{advanced && <label className="form-label note-input">Notas<input value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. sin picante"/></label>}
         <section className="payment-section"><div className="section-label"><b>Pago</b><span>{paid ? `${money(paid)} recibido` : 'Puedes cobrar después'}</span></div><div className="payment-options">{(['Pendiente', 'Efectivo', 'QR / transferencia', 'Mixto'] as const).map(mode => <button key={mode} className={paymentMode === mode ? 'selected' : ''} onClick={() => { setPaymentMode(mode); setCash(mode === 'Efectivo' ? String(total) : ''); setQr(mode === 'QR / transferencia' ? String(total) : ''); setError(''); }}>{mode}</button>)}</div>
           {(paymentMode === 'Efectivo' || paymentMode === 'Mixto') && <label className="form-label payment-amount">Efectivo (Bs)<input type="number" min="0" step="0.01" max={total} value={cash} onChange={event => setCash(event.target.value)} placeholder={paymentMode === 'Efectivo' ? String(total.toFixed(2)) : '0.00'}/></label>}
           {(paymentMode === 'QR / transferencia' || paymentMode === 'Mixto') && <label className="form-label payment-amount">QR / transferencia (Bs)<input type="number" min="0" step="0.01" max={total} value={qr} onChange={event => setQr(event.target.value)} placeholder={paymentMode === 'QR / transferencia' ? String(total.toFixed(2)) : '0.00'}/></label>}
           <div className="payment-totals"><span>Total <b>{money(total)}</b></span><span>Pagado <b>{money(paid)}</b></span><span>Saldo <b>{money(balance)}</b></span></div>
         </section>
       </section></div>
-      <footer className="checkout-footer"><div className="checkout-total"><span>Total del pedido</span><b>{money(total)}</b></div>{error && <p className="error" role="alert">{error}</p>}<button className="primary wide" onClick={submit}><Check size={18}/>Guardar pedido</button></footer>
+      <footer className="checkout-footer"><div className="checkout-total"><span>Total del pedido</span><b>{money(total)}</b></div>{error && <p className="error" role="alert">{error}</p>}<button className="primary wide" disabled={saving || !cart.length} onClick={() => void submit()}>{saving ? <><span className="spinner"/>Guardando…</> : <><Check size={18}/>Guardar pedido</>}</button></footer>
     </section></div>}
   </>;
 }
@@ -384,7 +386,7 @@ function Money({ data, onExpense, onIncome, onEditExpense, onDeleteExpense }: { 
   </>;
 }
 
-function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave, onIncomeSave }: { categories: string[]; expense?: Expense; income: boolean; onCategory: (category: string) => void; onClose: () => void; onSave: (expense: Expense) => void; onIncomeSave: (amount: number, category: string, date: string, note: string) => void }) {
+function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave, onIncomeSave }: { categories: string[]; expense?: Expense; income: boolean; onCategory: (category: string) => Promise<boolean>; onClose: () => void; onSave: (expense: Expense) => Promise<void>; onIncomeSave: (amount: number, category: string, date: string, note: string) => Promise<boolean> }) {
   useBodyScrollLock(true);
   const [amount, setAmount] = useState(expense ? String(expense.amount) : '');
   const [category, setCategory] = useState(expense?.category || categories[0] || 'Otros');
@@ -392,20 +394,22 @@ function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave
   const [note, setNote] = useState(expense?.note || '');
   const [method, setMethod] = useState(expense?.method || '');
   const [newCategory, setNewCategory] = useState('');
+  const [busy, setBusy] = useState(false);
   const parsedAmount = Number(amount);
-  const submit = (event: React.FormEvent) => { event.preventDefault(); if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !note.trim() && !income) return; if (income) onIncomeSave(parsedAmount, category, date, note.trim()); else onSave({ id: expense?.id || uid(), amount: parsedAmount, category, date, note: note.trim(), ...(method ? { method } : {}) }); };
+  const submit = (event: React.FormEvent) => { event.preventDefault(); if (busy || !Number.isFinite(parsedAmount) || parsedAmount <= 0 || !note.trim() && !income) return; setBusy(true); void (async () => { try { if (income) await onIncomeSave(parsedAmount, category, date, note.trim()); else await onSave({ id: expense?.id || uid(), amount: parsedAmount, category, date, note: note.trim(), ...(method ? { method } : {}) }); } finally { setBusy(false); } })(); };
+  const addCategory = async () => { const value = newCategory.trim(); if (!value || categories.includes(value) || busy) return; setBusy(true); try { if (await onCategory(value)) { setCategory(value); setNewCategory(''); } } finally { setBusy(false); } };
   return <div className="modal-backdrop" role="presentation"><form className="modal expense-modal" role="dialog" aria-modal="true" onSubmit={submit}>
     <button type="button" className="back-button modal-back" onClick={onClose} aria-label="Volver"><ArrowLeft size={20}/></button><div className="eyebrow">{income ? 'ENTRADA DE DINERO' : 'SALIDA DE DINERO'}</div><h2>{income ? 'Registrar un ingreso' : expense ? 'Editar gasto' : 'Registrar un gasto'}</h2><p>{income ? 'Anota un ingreso que no venga de un pedido.' : 'Primero cuéntanos qué compraste o pagaste.'}</p>
     <label className="form-label expense-note-label">Detalle del gasto{!income && <input required value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Compré pollo"/>}{income && <input value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Venta adicional"/>}</label>
     <label className="form-label amount-label">Monto <span>Bs</span><input aria-label="Monto en bolivianos" type="number" min="0.01" step="0.01" required value={amount} onChange={event => setAmount(event.target.value)} placeholder="0.00"/></label>
     <label className="form-label">Categoría<select value={category} onChange={event => setCategory(event.target.value)}>{categories.map(item => <option key={item}>{item}</option>)}{income && !categories.length && <option>Otro</option>}</select></label>
-    {!income && <>{newCategory === null ? null : newCategory !== '' ? <div className="category-add"><input aria-label="Nueva categoría" value={newCategory} onChange={event => setNewCategory(event.target.value)} placeholder="Nombre de la categoría"/><button className="secondary" type="button" onClick={() => { const value = newCategory.trim(); if (value && !categories.includes(value)) { onCategory(value); setCategory(value); } setNewCategory(''); }}>Agregar</button></div> : <button type="button" className="add-client" onClick={() => setNewCategory(' ')}><Plus size={16}/>Crear categoría</button>}</>}
+    {!income && <>{newCategory !== '' ? <div className="category-add"><input aria-label="Nueva categoría" value={newCategory} onChange={event => setNewCategory(event.target.value)} placeholder="Nombre de la categoría"/><button className="secondary" type="button" disabled={busy || !newCategory.trim()} onClick={() => void addCategory()}>{busy ? 'Guardando…' : 'Agregar'}</button></div> : <button type="button" className="add-client" onClick={() => setNewCategory(' ')}><Plus size={16}/>Crear categoría</button>}</>}
     <div className="delivery-fields expense-meta"><label className="form-label">Fecha<input type="date" value={date} onChange={event => setDate(event.target.value)}/></label><label className="form-label">Forma de pago <small>Opcional</small><select value={method} onChange={event => setMethod(event.target.value)}><option value="">Sin especificar</option><option>Efectivo</option><option>QR / transferencia</option></select></label></div>
-    <button className="primary wide expense-submit" disabled={!parsedAmount || parsedAmount <= 0 || !income && !note.trim()}>{expense ? 'Guardar cambios' : income ? 'Guardar ingreso' : 'Guardar gasto'}</button>
+    <button className="primary wide expense-submit" disabled={busy || !parsedAmount || parsedAmount <= 0 || !income && !note.trim()}>{busy ? 'Guardando…' : expense ? 'Guardar cambios' : income ? 'Guardar ingreso' : 'Guardar gasto'}</button>
   </form></div>;
 }
 
-function OrderDetail({ order, data, uid: ownerUid, onClose, onDone, onUpdate, onAddPayment, onCancel, onReceipt }: { order?: Order; data: Data; uid?: string; onClose: () => void; onDone: (id: string) => void; onUpdate: (order: Order) => void; onAddPayment: (id: string, amount: number, method: PaymentMethod) => void; onCancel: (id: string) => void; onReceipt: (order: Order) => void }) {
+function OrderDetail({ order, data, uid: ownerUid, onClose, onDone, onUpdate, onAddPayment, onCancel, onReceipt }: { order?: Order; data: Data; uid?: string; onClose: () => void; onDone: (id: string) => Promise<boolean>; onUpdate: (order: Order) => Promise<boolean>; onAddPayment: (id: string, amount: number, method: PaymentMethod) => Promise<boolean>; onCancel: (id: string) => Promise<void>; onReceipt: (order: Order) => void }) {
   const [editing, setEditing] = useState(false);
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<PaymentMethod>('Efectivo');
@@ -415,21 +419,24 @@ function OrderDetail({ order, data, uid: ownerUid, onClose, onDone, onUpdate, on
   const [note, setNote] = useState(order?.note || '');
   const [items, setItems] = useState<Line[]>(order?.items || []);
   const [newProduct, setNewProduct] = useState('');
+  const [saving, setSaving] = useState(false);
   useEffect(() => { if (!order) return; setCustomer(order.customer); setDate(order.date); setTime(order.time); setNote(order.note); setItems(order.items); setEditing(false); setAmount(''); }, [order?.id]);
   if (!order) return null;
-  const total = items.reduce((sum, item) => sum + item.qty * item.price, 0);
+    const total = sumCurrency(items.map(item => item.qty * item.price));
   const balance = getBalance(order.total, order.paid);
   const paymentSum = paymentTotals(order.payments || []);
-  const saveEdit = () => {
-    if (!items.length || total < order.paid) return;
-    onUpdate({ ...order, customer: customer.trim(), date, time, note: note.trim(), items, total }); setEditing(false);
+  const saveEdit = async () => {
+    if (saving || !items.length || total < order.paid) return;
+    setSaving(true);
+    try { if (await onUpdate({ ...order, customer: customer.trim(), date, time, note: note.trim(), items, total })) setEditing(false); }
+    finally { setSaving(false); }
   };
   return <div className="modal-backdrop" role="presentation"><section className="modal detail-modal" role="dialog" aria-modal="true">
     <header className="detail-header"><button className="back-button" onClick={onClose} aria-label="Volver al historial"><ArrowLeft size={21}/></button><div><div className="eyebrow">{editing ? 'EDITAR PEDIDO' : 'DETALLE DEL PEDIDO'}</div><h2>{editing ? 'Modificar pedido' : order.customer || 'Venta sin cliente'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X/></button></header>
-    {editing ? <div className="detail-body"><label className="form-label">Cliente<input value={customer} onChange={event => setCustomer(event.target.value)}/></label><div className="delivery-fields delivery-schedule"><label className="form-label">Fecha<input type="date" value={date} onChange={event => setDate(event.target.value)}/></label><label className="form-label">Hora<input type="time" value={time} onChange={event => setTime(event.target.value)}/></label></div><label className="form-label">Nota<input value={note} onChange={event => setNote(event.target.value)}/></label><div className="eyebrow detail-subhead">PLATOS DEL PEDIDO</div>{items.map((item, index) => <div className="cart-line" key={`${item.productId}:${index}`}><div className="cart-item-copy"><b>{item.name}</b><small>{money(item.price)} cada uno</small></div><div className="qty"><button onClick={() => setItems(current => current.map((line, i) => i === index ? { ...line, qty: line.qty - 1 } : line).filter(line => line.qty > 0))}><Minus size={16}/></button><b>{item.qty}</b><button onClick={() => setItems(current => current.map((line, i) => i === index ? { ...line, qty: line.qty + 1 } : line))}><Plus size={16}/></button></div><b>{money(item.qty * item.price)}</b><button className="remove-line" onClick={() => setItems(current => current.filter((_, i) => i !== index))} aria-label={`Eliminar ${item.name}`}><Trash2 size={17}/></button></div>)}<label className="form-label">Agregar plato<select value={newProduct} onChange={event => { const product = data.products.find(item => item.id === event.target.value); if (!product) return; const old = items.find(item => item.productId === product.id); setItems(old ? items.map(item => item.productId === product.id ? { ...item, qty: item.qty + 1 } : item) : [...items, { productId: product.id, name: product.name, qty: 1, price: product.price, cost: product.cost }]); setNewProduct(''); }}><option value="">Seleccionar plato…</option>{data.products.filter(product => product.active).map(product => <option value={product.id} key={product.id}>{product.name} · {money(product.price)}</option>)}</select></label><div className="checkout-total"><span>Nuevo total</span><b>{money(total)}</b></div>{total < order.paid && <p className="error">El nuevo total no puede ser menor a lo ya pagado ({money(order.paid)}).</p>}<button className="primary wide" disabled={!items.length || total < order.paid} onClick={saveEdit}>Guardar cambios</button></div>
+    {editing ? <div className="detail-body"><label className="form-label">Cliente<input value={customer} onChange={event => setCustomer(event.target.value)}/></label><div className="delivery-fields delivery-schedule"><label className="form-label">Fecha<input type="date" value={date} onChange={event => setDate(event.target.value)}/></label><label className="form-label">Hora<input type="time" value={time} onChange={event => setTime(event.target.value)}/></label></div><label className="form-label">Nota<input value={note} onChange={event => setNote(event.target.value)}/></label><div className="eyebrow detail-subhead">PLATOS DEL PEDIDO</div>{items.map((item, index) => <div className="cart-line" key={`${item.productId}:${index}`}><div className="cart-item-copy"><b>{item.name}</b><small>{money(item.price)} cada uno</small></div><div className="qty"><button type="button" onClick={() => setItems(current => current.map((line, i) => i === index ? { ...line, qty: line.qty - 1 } : line).filter(line => line.qty > 0))}><Minus size={16}/></button><b>{item.qty}</b><button type="button" onClick={() => setItems(current => current.map((line, i) => i === index ? { ...line, qty: line.qty + 1 } : line))}><Plus size={16}/></button></div><b>{money(item.qty * item.price)}</b><button type="button" className="remove-line" onClick={() => setItems(current => current.filter((_, i) => i !== index))} aria-label={`Eliminar ${item.name}`}><Trash2 size={17}/></button></div>)}<label className="form-label">Agregar plato<select value={newProduct} onChange={event => { const product = data.products.find(item => item.id === event.target.value); if (!product) return; const old = items.find(item => item.productId === product.id); setItems(old ? items.map(item => item.productId === product.id ? { ...item, qty: item.qty + 1 } : item) : [...items, { productId: product.id, name: product.name, qty: 1, price: product.price, cost: product.cost }]); setNewProduct(''); }}><option value="">Seleccionar plato…</option>{data.products.filter(product => product.active).map(product => <option value={product.id} key={product.id}>{product.name} · {money(product.price)}</option>)}</select></label><div className="checkout-total"><span>Nuevo total</span><b>{money(total)}</b></div>{total < order.paid && <p className="error">El nuevo total no puede ser menor a lo ya pagado ({money(order.paid)}).</p>}<button className="primary wide" disabled={saving || !items.length || total < order.paid} onClick={() => void saveEdit()}>{saving ? 'Guardando…' : 'Guardar cambios'}</button></div>
       : <><div className="detail-body"><div className="detail-date"><CalendarDays size={17}/>{formatReadableDate(order.date)}{order.time && <><span>·</span><Clock3 size={16}/>{order.time}</>}</div><div className="detail-items">{order.items.map((item, index) => <div className="detail-line" key={`${item.productId}:${index}`}><span>{item.qty} × {item.name}<small>{money(item.price)} cada uno</small></span><b>{money(item.qty * item.price)}</b></div>)}</div>{order.note && <p className="detail-note">{order.note}</p>}<div className="receipt-totals"><div><span>Total</span><b>{money(order.total)}</b></div><div><span>Pagado</span><b>{money(order.paid)}</b></div><div><span>Saldo</span><b>{money(balance)}</b></div></div><div className="payment-breakdown"><b>Pagos recibidos</b><span>Efectivo {money(paymentSum.Efectivo)} · QR {money(paymentSum['QR / transferencia'])}{paymentSum['Otro / sin detalle'] ? ` · Otros ${money(paymentSum['Otro / sin detalle'])}` : ''}</span>{(order.payments || []).map(payment => <div className="payment-entry" key={payment.id}><span>{payment.method} · {formatReadableDate(payment.date)}</span><b>{money(payment.amount)}</b></div>)}{!(order.payments || []).length && <small>{order.paid ? `Pago inicial · ${order.method}` : 'Aún no se registraron pagos.'}</small>}</div>
-        {!editing && order.status !== 'Cancelado' && balance > 0 && <section className="add-payment"><div className="section-label"><b>Registrar abono</b><span>Saldo {money(balance)}</span></div><label className="form-label">Monto (Bs)<input type="number" min="0.01" max={balance} step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="0.00"/></label><label className="form-label">Forma de pago<select value={method} onChange={event => setMethod(event.target.value as PaymentMethod)}><option>Efectivo</option><option>QR / transferencia</option></select></label><button className="secondary wide" disabled={!validPayment(order.total, order.paid, Number(amount))} onClick={() => { onAddPayment(order.id, Number(amount), method); setAmount(''); }}>Guardar abono</button></section>}
-      </div><footer className="detail-footer"><button className="secondary" onClick={() => onReceipt(order)}><Download size={17}/>Compartir recibo</button><button className="secondary" onClick={() => void downloadReceipt(order, data.business, data.businessLogoId, ownerUid, paperWidth())}><Download size={17}/>Descargar</button><button className="secondary" onClick={() => printReceipt(order, data.business, data.businessLogoId, ownerUid, paperWidth())}><Printer size={17}/>Imprimir</button>{order.status === 'Pendiente' && <button className="secondary" onClick={() => setEditing(true)}>Editar</button>}{order.status === 'Pendiente' && <button className="primary" onClick={() => { onDone(order.id); onClose(); }}><Check size={17}/>Entregado</button>}{order.status === 'Pendiente' && <button className="danger-button" onClick={() => onCancel(order.id)}>Cancelar pedido</button>}</footer></>}
+        {!editing && order.status !== 'Cancelado' && balance > 0 && <section className="add-payment"><div className="section-label"><b>Registrar abono</b><span>Saldo {money(balance)}</span></div><label className="form-label">Monto (Bs)<input type="number" min="0.01" max={balance} step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="0.00"/></label><label className="form-label">Forma de pago<select value={method} onChange={event => setMethod(event.target.value as PaymentMethod)}><option>Efectivo</option><option>QR / transferencia</option></select></label><button className="secondary wide" disabled={saving || !validPayment(order.total, order.paid, Number(amount))} onClick={() => { if (saving) return; setSaving(true); void onAddPayment(order.id, Number(amount), method).then(saved => { if (saved) setAmount(''); }).finally(() => setSaving(false)); }}>{saving ? 'Guardando…' : 'Guardar abono'}</button></section>}
+      </div><footer className="detail-footer"><button className="secondary" disabled={saving} onClick={() => onReceipt(order)}><Download size={17}/>Compartir recibo</button><button className="secondary" disabled={saving} onClick={() => void downloadReceipt(order, data.business, data.businessLogoId, ownerUid, paperWidth())}><Download size={17}/>Descargar</button><button className="secondary" disabled={saving} onClick={() => void printReceipt(order, data.business, data.businessLogoId, ownerUid, paperWidth())}><Printer size={17}/>Imprimir</button>{order.status === 'Pendiente' && <button className="secondary" disabled={saving} onClick={() => setEditing(true)}>Editar</button>}{order.status === 'Pendiente' && <button className="primary" disabled={saving} onClick={() => { setSaving(true); void onDone(order.id).then(saved => { if (saved) onClose(); }).finally(() => setSaving(false)); }}>{saving ? 'Guardando…' : <><Check size={17}/>Entregado</>}</button>}{order.status === 'Pendiente' && <button className="danger-button" disabled={saving} onClick={() => { setSaving(true); void onCancel(order.id).finally(() => setSaving(false)); }}>Cancelar pedido</button>}</footer></>}
   </section></div>;
 }
 
@@ -498,8 +505,8 @@ async function printReceipt(order: Order, business: string, imageId?: string, ow
   const printWindow = window.open('', '_blank', 'width=420,height=700');
   if (!printWindow) { window.alert('Permite las ventanas emergentes para imprimir el recibo.'); return; }
   const logo = await logoData(ownerUid, imageId);
-  printWindow.document.open(); printWindow.document.write(receiptMarkup(order, business, logo, width)); printWindow.document.close();
   printWindow.onload = () => { printWindow.focus(); printWindow.print(); };
+  printWindow.document.open(); printWindow.document.write(receiptMarkup(order, business, logo, width)); printWindow.document.close();
 }
 
 async function shareReceipt(order: Order, business: string, imageId?: string, ownerUid?: string, width: '58mm' | '80mm' = paperWidth()) {

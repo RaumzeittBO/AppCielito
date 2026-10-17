@@ -1,5 +1,5 @@
 import { getMessaging, getToken, isSupported } from 'firebase/messaging';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { auth, db, firebaseApp } from './firebase';
 
@@ -16,10 +16,12 @@ export async function enablePush(user: User) {
   const messaging = getMessaging(firebaseApp);
   const token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration });
   if (!token || auth?.currentUser?.uid !== user.uid) throw new Error('No se pudo registrar este dispositivo.');
-  await setDoc(doc(db, 'users', user.uid, 'devices', encodeURIComponent(token)), {
+  const id = encodeURIComponent(token);
+  await setDoc(doc(db, 'users', user.uid, 'devices', id), {
+    id,
     token,
     platform: navigator.userAgent,
-    updatedAt: new Date().toISOString(),
+    updatedAt: serverTimestamp(),
   });
   return true;
 }

@@ -9,10 +9,8 @@ service cloud.firestore {
     function boundedText(data, field, maxLength) {
       return data[field] is string && data[field].size() <= maxLength;
     }
-    function validRecord(bucket, recordId) {
-      let data = request.resource.data;
-      return data.id == recordId && data.updatedAt is timestamp && (
-        (bucket == 'products' && boundedText(data, 'name', 100)
+    function validEntity(bucket, data) {
+      return (bucket == 'products' && boundedText(data, 'name', 100)
           && data.price is number && data.price >= 0
           && data.cost is number && data.cost >= 0 && data.active is bool
           && data.get('imageId', '') is string && data.get('imageId', '').size() <= 100)
@@ -27,12 +25,17 @@ service cloud.firestore {
         || ((bucket == 'expenses' || bucket == 'incomes')
           && data.amount is number && data.amount > 0
           && boundedText(data, 'category', 80) && data.date is string)
-        || (bucket == 'categories' && boundedText(data, 'name', 80))
         || (bucket == 'devices' && boundedText(data, 'token', 4096)
-          && boundedText(data, 'platform', 512))
+          && boundedText(data, 'platform', 512));
+    }
+    function validRecord(bucket, recordId) {
+      let data = request.resource.data;
+      return data.updatedAt is timestamp && (
+        (bucket == 'categories' && boundedText(data, 'name', 80))
         || (bucket == 'settings' && recordId == 'business'
           && boundedText(data, 'name', 120)
           && data.get('logoImageId', '') is string && data.get('logoImageId', '').size() <= 100)
+        || (data.id == recordId && validEntity(bucket, data))
       );
     }
     match /users/{uid}/{bucket}/{recordId} {

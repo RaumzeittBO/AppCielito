@@ -1,9 +1,17 @@
 export type PaymentMethod = 'Efectivo' | 'QR / transferencia' | 'Otro / sin detalle';
 export type Payment = { id: string; amount: number; date: string; method: PaymentMethod };
 
+export function roundCurrency(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+export function sumCurrency(values: number[]) {
+  return roundCurrency(values.reduce((sum, value) => sum + value, 0));
+}
+
 export function paymentTotals(payments: Payment[]) {
   return payments.reduce((totals, payment) => {
-    totals[payment.method] += payment.amount;
+    totals[payment.method] = roundCurrency(totals[payment.method] + payment.amount);
     return totals;
   }, { 'Efectivo': 0, 'QR / transferencia': 0, 'Otro / sin detalle': 0 });
 }
@@ -13,7 +21,7 @@ export function getBalance(total: number, paid: number) {
 }
 
 export function validPayment(total: number, paid: number, amount: number) {
-  return Number.isFinite(amount) && amount > 0 && amount <= getBalance(total, paid);
+  return Number.isFinite(amount) && amount > 0 && Math.round(amount * 100) <= Math.round(getBalance(total, paid) * 100);
 }
 
 export function getDateRange(date: string, range: 'day' | 'week' | 'month') {

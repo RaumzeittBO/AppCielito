@@ -23,6 +23,7 @@
 @media(max-width:380px){.order-main{grid-template-columns:57px minmax(0,1fr) auto;gap:6px}.order-time{white-space:nowrap;font-size:11px}.order-time small{font-size:9px}}
 @media(max-width:760px){
   .delivery-fields{grid-template-columns:minmax(0,1fr) minmax(0,1fr);min-width:0}
+  .delivery-fields.delivery-schedule,.delivery-fields.expense-meta{grid-template-columns:minmax(0,1fr)}
   .delivery-fields>.form-label{width:100%;min-width:0;max-width:100%}
   .delivery-fields>.form-label input,.delivery-fields>.form-label select{display:block;width:100%;min-width:0;max-width:100%;font-size:16px}
   .checkout-backdrop,.modal-backdrop{overflow:hidden;overscroll-behavior:contain}

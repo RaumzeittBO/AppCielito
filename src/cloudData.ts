@@ -1,5 +1,6 @@
 import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc, writeBatch, type Unsubscribe } from 'firebase/firestore';
 import { db } from './firebase';
+import { diffRecords, type SyncRecord } from './syncDiff';
 
 const arrays = ['products', 'customers', 'orders', 'expenses', 'incomes'] as const;
 type Bucket = typeof arrays[number];
@@ -68,14 +69,27 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
   return () => unsubscribers.forEach(unsubscribe => unsubscribe());
 }
 
-export async function persistOwnerData(uid: string, value: CloudData) {
+export async function persistOwnerData(uid: string, value: CloudData, previous: CloudData) {
   const firestore = db;
   if (!firestore) throw new Error('Firestore no está configurado.');
-  await Promise.all([
-    ...arrays.flatMap(bucket => rows(bucket, value[bucket]).map(row => setDoc(doc(firestore, 'users', uid, bucket, String(row.id)), { ...row, updatedAt: serverTimestamp() }))),
-    ...value.categories.map(name => setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() })),
-    setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }),
-  ]);
+  const writes: Promise<unknown>[] = [];
+  for (const bucket of arrays) {
+    const delta = diffRecords(rows(bucket, previous[bucket]) as SyncRecord[], rows(bucket, value[bucket]) as SyncRecord[]);
+    for (const row of delta.upsert) writes.push(setDoc(doc(firestore, 'users', uid, bucket, row.id), { ...row, updatedAt: serverTimestamp() }));
+    for (const id of delta.remove) writes.push(deleteDoc(doc(firestore, 'users', uid, bucket, id)));
+  }
+  const oldCategories = new Set(previous.categories);
+  const nextCategories = new Set(value.categories);
+  for (const name of nextCategories) {
+    if (!oldCategories.has(name)) writes.push(setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() }));
+  }
+  for (const name of oldCategories) {
+    if (!nextCategories.has(name)) writes.push(deleteDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name))));
+  }
+  if (value.business !== previous.business || value.businessLogoId !== previous.businessLogoId) {
+    writes.push(setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }));
+  }
+  await Promise.all(writes);
 }
 
 /** Remove a single owner record explicitly; persistOwnerData is intentionally additive. */

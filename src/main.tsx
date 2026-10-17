@@ -75,6 +75,7 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [cloud, setCloud] = useState(false);
+  const [syncReady, setSyncReady] = useState(!db);
   const [checkoutOrderId, setCheckoutOrderId] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
 
@@ -101,25 +102,30 @@ function App() {
     return onAuthStateChanged(auth, current => {
       setAuthLoading(false);
     if (current && current.uid !== OWNER_UID) {
-        setUser(null); setAuthError('Esta cuenta no está autorizada para ver el negocio.'); void signOut(auth!); return;
+        setUser(null); setSyncReady(true); setAuthError('Esta cuenta no está autorizada para ver el negocio.'); void signOut(auth!); return;
       }
+      setSyncReady(!current);
       setUser(current);
     });
   }, []);
   useEffect(() => {
-    if (!db || !user) return;
+    if (!db || !user) { setSyncReady(true); return; }
     let active = true;
     let unsubscribe: (() => void) | undefined;
+    setSyncReady(false);
     setCloud(false);
     void hydrateOwnerData(user.uid, data, value => { if (active) setData(current => ({ ...current, ...value }) as Data); }, setCloud)
-      .then(stop => { if (active) unsubscribe = stop; else stop(); }).catch(() => setCloud(false));
+      .then(stop => { if (active) { unsubscribe = stop; setSyncReady(true); } else stop(); })
+      .catch(error => { console.error('[Cielito] No se pudieron cargar los datos de Firestore.', error); if (active) { setCloud(false); setSyncReady(true); } });
     return () => { active = false; unsubscribe?.(); };
     // Hydration deliberately runs once per authenticated owner session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
   const update = (next: Data) => {
+    if (db && user && !syncReady) { ping('Espera a que termine la sincronización para guardar.'); return; }
+    const previous = data;
     setData(next);
-    if (db && user) void persistOwnerData(user.uid, next).then(() => setCloud(true)).catch(() => { setCloud(false); ping('No se pudo sincronizar. Revisa tu conexión.'); });
+    if (db && user) void persistOwnerData(user.uid, next, previous).then(() => setCloud(true)).catch(error => { console.error('[Cielito] Falló la sincronización de cambios.', error); setCloud(false); ping('No se pudo sincronizar. Revisa tu conexión.'); });
   };
   const ping = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2800); };
 
@@ -179,6 +185,7 @@ function App() {
     catch (error) { const code = (error as { code?: string }).code; setAuthError(code === 'auth/network-request-failed' ? 'No hay conexión. Revisa internet e inténtalo otra vez.' : 'No se pudo iniciar sesión. Revisa el correo y la contraseña.'); }
     finally { setLoginLoading(false); }
   }}/>;
+  if (db && user && !syncReady) return <main className="login"><div className="login-card loading-card"><BrandMark/><p>Sincronizando tus datos…</p></div></main>;
 
   return <div className="app-shell">
     <aside className="sidebar">

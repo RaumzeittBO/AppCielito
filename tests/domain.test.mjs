@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getBalance, getDateRange, paymentTotals, validPayment } from '../src/domain.ts';
+import { diffRecords } from '../src/syncDiff.ts';
+
+test('la sincronización de productos escribe solo el cambio y no reescribe registros antiguos', () => {
+  const old = [{ id: 'legacy', name: 'Antiguo', price: 20, updatedAt: 'timestamp previo' }];
+  const next = [...old, { id: 'new', name: 'Nuevo', price: 35 }];
+  assert.deepEqual(diffRecords(old, next), { upsert: [{ id: 'new', name: 'Nuevo', price: 35 }], remove: [] });
+});
+
+test('la sincronización detecta ediciones y eliminaciones puntuales', () => {
+  const previous = [{ id: 'edit', name: 'Plato', price: 20 }, { id: 'remove', name: 'Otro', price: 25 }];
+  const next = [{ id: 'edit', name: 'Plato', price: 22 }];
+  assert.deepEqual(diffRecords(previous, next), { upsert: [{ id: 'edit', name: 'Plato', price: 22 }], remove: ['remove'] });
+});
 
 test('un pago mixto conserva el total por método', () => {
   const totals = paymentTotals([

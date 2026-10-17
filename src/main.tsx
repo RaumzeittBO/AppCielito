@@ -34,6 +34,26 @@ const seed: Data = {
   categories: ['Ingredientes', 'Verduras', 'Carnes', 'Transporte', 'Gas', 'Envases', 'Servicios', 'Otros'],
 };
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(new Date());
+
+function useBodyScrollLock(locked: boolean) {
+  useEffect(() => {
+    if (!locked) return;
+    const body = document.body;
+    const scrollY = window.scrollY;
+    const previous = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow };
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.width = '100%';
+    body.style.overflow = 'hidden';
+    return () => {
+      body.style.position = previous.position;
+      body.style.top = previous.top;
+      body.style.width = previous.width;
+      body.style.overflow = previous.overflow;
+      window.scrollTo(0, scrollY);
+    };
+  }, [locked]);
+}
 const money = (value: number) => `Bs ${Number(value || 0).toFixed(2)}`;
 const uid = () => crypto.randomUUID();
 function load(): Data {
@@ -240,6 +260,7 @@ function Sell({ products, customers, uid: ownerUid, onSave, onCustomer }: { prod
   const [cash, setCash] = useState('');
   const [qr, setQr] = useState('');
   const [error, setError] = useState('');
+  useBodyScrollLock(cartOpen);
   const total = cart.reduce((sum, item) => sum + item.qty * item.price, 0);
   const count = cart.reduce((sum, item) => sum + item.qty, 0);
   const cashAmount = paymentMode === 'Efectivo' ? Number(cash) : paymentMode === 'Mixto' ? Number(cash || 0) : 0;
@@ -342,6 +363,7 @@ function Money({ data, onExpense, onIncome, onEditExpense, onDeleteExpense }: { 
 }
 
 function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave, onIncomeSave }: { categories: string[]; expense?: Expense; income: boolean; onCategory: (category: string) => void; onClose: () => void; onSave: (expense: Expense) => void; onIncomeSave: (amount: number, category: string, date: string, note: string) => void }) {
+  useBodyScrollLock(true);
   const [amount, setAmount] = useState(expense ? String(expense.amount) : '');
   const [category, setCategory] = useState(expense?.category || categories[0] || 'Otros');
   const [date, setDate] = useState(expense?.date || today());
@@ -352,7 +374,7 @@ function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave
   const submit = (event: React.FormEvent) => { event.preventDefault(); if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !note.trim() && !income) return; if (income) onIncomeSave(parsedAmount, category, date, note.trim()); else onSave({ id: expense?.id || uid(), amount: parsedAmount, category, date, note: note.trim(), ...(method ? { method } : {}) }); };
   return <div className="modal-backdrop" role="presentation"><form className="modal expense-modal" role="dialog" aria-modal="true" onSubmit={submit}>
     <button type="button" className="back-button modal-back" onClick={onClose} aria-label="Volver"><ArrowLeft size={20}/></button><div className="eyebrow">{income ? 'ENTRADA DE DINERO' : 'SALIDA DE DINERO'}</div><h2>{income ? 'Registrar un ingreso' : expense ? 'Editar gasto' : 'Registrar un gasto'}</h2><p>{income ? 'Anota un ingreso que no venga de un pedido.' : 'Primero cuéntanos qué compraste o pagaste.'}</p>
-    <label className="form-label expense-note-label">Detalle del gasto{!income && <input autoFocus required value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Compré pollo"/>}{income && <input autoFocus value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Venta adicional"/>}</label>
+    <label className="form-label expense-note-label">Detalle del gasto{!income && <input required value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Compré pollo"/>}{income && <input value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Venta adicional"/>}</label>
     <label className="form-label amount-label">Monto <span>Bs</span><input aria-label="Monto en bolivianos" type="number" min="0.01" step="0.01" required value={amount} onChange={event => setAmount(event.target.value)} placeholder="0.00"/></label>
     <label className="form-label">Categoría<select value={category} onChange={event => setCategory(event.target.value)}>{categories.map(item => <option key={item}>{item}</option>)}{income && !categories.length && <option>Otro</option>}</select></label>
     {!income && <>{newCategory === null ? null : newCategory !== '' ? <div className="category-add"><input aria-label="Nueva categoría" value={newCategory} onChange={event => setNewCategory(event.target.value)} placeholder="Nombre de la categoría"/><button className="secondary" type="button" onClick={() => { const value = newCategory.trim(); if (value && !categories.includes(value)) { onCategory(value); setCategory(value); } setNewCategory(''); }}>Agregar</button></div> : <button type="button" className="add-client" onClick={() => setNewCategory(' ')}><Plus size={16}/>Crear categoría</button>}</>}

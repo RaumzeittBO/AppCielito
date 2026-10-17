@@ -32,4 +32,29 @@
   .checkout-body{flex:1;min-height:0;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;touch-action:pan-y}
   .modal{max-height:100dvh;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 }
+
+/* Compact, aligned date controls and independently scrollable mobile sheets. */
+.delivery-fields.delivery-schedule{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:end}
+.expense-category-date{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(118px,.85fr);gap:12px;align-items:end}
+.expense-category-date>.form-label{min-width:0;margin:10px 0}
+.expense-category-date .expense-date input{appearance:none;-webkit-appearance:none;text-align:center;padding-inline:7px;min-width:0;width:100%;font-variant-numeric:tabular-nums}
+.expense-category-date .expense-date input::-webkit-date-and-time-value{min-width:0;text-align:center}
+.expense-category-date .expense-date input::-webkit-calendar-picker-indicator{margin:0;padding:0}
+.expense-payment{max-width:100%}
+.checkout-backdrop,.modal-backdrop{touch-action:pan-y;overscroll-behavior:contain}
+.checkout-sheet,.modal{min-width:0;touch-action:pan-y}
+.modal{overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
+.expense-modal{max-height:calc(100dvh - env(safe-area-inset-top) - 8px);padding-bottom:calc(22px + env(safe-area-inset-bottom))}
+.checkout-body{touch-action:pan-y}
+@media(max-width:760px){
+  .delivery-fields.delivery-schedule{grid-template-columns:minmax(0,1fr) minmax(0,.78fr);gap:10px}
+  .delivery-fields.delivery-schedule>.form-label{min-width:0;overflow:hidden}
+  .delivery-fields.delivery-schedule .form-label input{min-width:0;width:100%;max-width:100%;padding-inline:8px;text-align:center;appearance:none;-webkit-appearance:none}
+  .delivery-fields.delivery-schedule .form-label input::-webkit-date-and-time-value{min-width:0;text-align:center}
+  .expense-category-date{grid-template-columns:minmax(0,1fr) minmax(118px,.78fr);gap:9px}
+  .expense-category-date>.form-label input,.expense-category-date>.form-label select{width:100%;min-width:0;max-width:100%;padding-inline:8px;font-size:15px}
+  .expense-category-date .expense-date input{font-size:14px}
+  .expense-payment{margin-top:4px}
+  .checkout-sheet{height:100dvh;height:100svh;max-height:100dvh;max-height:100svh}
+}
 .update-banner{position:fixed;z-index:60;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:min(560px,calc(100vw - 24px));display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px 10px 16px;border:1px solid #dbe7dc;border-radius:14px;background:#fff;box-shadow:0 8px 28px rgba(33,52,41,.16);color:#42564a;font-size:12px;line-height:1.4}.update-banner button{min-height:42px;flex:none;border:0;border-radius:10px;background:var(--green);color:white;padding:0 14px;font-size:12px;font-weight:700}

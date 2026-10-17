@@ -31,3 +31,4 @@
   .checkout-body{flex:1;min-height:0;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;touch-action:pan-y}
   .modal{max-height:100dvh;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 }
+.update-banner{position:fixed;z-index:60;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:min(560px,calc(100vw - 24px));display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px 10px 16px;border:1px solid #dbe7dc;border-radius:14px;background:#fff;box-shadow:0 8px 28px rgba(33,52,41,.16);color:#42564a;font-size:12px;line-height:1.4}.update-banner button{min-height:42px;flex:none;border:0;border-radius:10px;background:var(--green);color:white;padding:0 14px;font-size:12px;font-weight:700}

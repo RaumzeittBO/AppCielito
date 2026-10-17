@@ -76,8 +76,22 @@ function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [cloud, setCloud] = useState(false);
   const [checkoutOrderId, setCheckoutOrderId] = useState('');
+  const [updateReady, setUpdateReady] = useState(false);
 
   useEffect(() => { localStorage.setItem('cielito-data', JSON.stringify(data)); }, [data]);
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    let hadController = Boolean(navigator.serviceWorker.controller);
+    const onControllerChange = () => {
+      if (hadController) setUpdateReady(true);
+      hadController = true;
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+    void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+      .then(registration => registration.update())
+      .catch(() => undefined);
+    return () => navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+  }, []);
   useEffect(() => {
     const orderId = new URLSearchParams(window.location.search).get('orderId');
     if (orderId) { setPage('Pedidos'); setModal(`detail:${orderId}`); }
@@ -156,7 +170,7 @@ function App() {
     update({ ...data, expenses: exists ? data.expenses.map(expense => expense.id === value.id ? value : expense) : [value, ...data.expenses] });
     setModal(''); ping(exists ? 'Gasto actualizado' : 'Gasto guardado');
   };
-  const install = () => { if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => ping('No se pudo instalar ahora.')); ping('Usa “Añadir a pantalla de inicio” en el menú del navegador.'); };
+  const install = () => { if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => ping('No se pudo instalar ahora.')); ping('Usa “Añadir a pantalla de inicio” en el menú del navegador.'); };
 
   if (authLoading) return <main className="login"><div className="login-card loading-card"><BrandMark/><p>Preparando Cielito…</p></div></main>;
   if (auth && firebaseConfigured && !user) return <Login email={email} setEmail={setEmail} password={password} setPassword={setPassword} showPassword={showPassword} setShowPassword={setShowPassword} error={authError} loading={loginLoading} onSubmit={async event => {
@@ -194,6 +208,7 @@ function App() {
       </div>
     </main>
     <nav className="mobile-nav">{nav.map(([name, Icon]) => <button className={page === name ? 'active' : ''} key={name} onClick={() => setPage(name)}><Icon size={20}/><span>{name}</span></button>)}</nav>
+    {updateReady && <div className="update-banner" role="status"><span>Hay una versión nueva lista. Actualiza cuando termines lo que estás haciendo.</span><button onClick={() => window.location.reload()}>Actualizar</button></div>}
     {(modal === 'expense' || modal === 'income' || modal.startsWith('expense:')) && <ExpenseModal categories={modal === 'income' ? ['Venta adicional', 'Otro'] : data.categories} expense={modal.startsWith('expense:') ? data.expenses.find(item => item.id === modal.split(':')[1]) : undefined} income={modal === 'income'} onCategory={category => update({ ...data, categories: data.categories.includes(category) ? data.categories : [...data.categories, category] })} onClose={() => setModal('')} onSave={value => saveExpense(value)} onIncomeSave={(amount, category, date, note) => { update({ ...data, incomes: [{ id: uid(), amount, category, date, note }, ...data.incomes] }); setModal(''); ping('Ingreso guardado'); }}/>}
     {modal.startsWith('detail:') && <OrderDetail order={data.orders.find(order => order.id === modal.split(':')[1])} data={data} uid={user?.uid} onClose={() => setModal('')} onDone={markDone} onUpdate={order => { update({ ...data, orders: data.orders.map(item => item.id === order.id ? order : item) }); ping('Pedido actualizado'); }} onAddPayment={(id, amount, method) => {
       update({ ...data, orders: data.orders.map(order => {

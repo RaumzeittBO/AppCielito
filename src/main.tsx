@@ -13,6 +13,7 @@ import { CloudImage } from './ManagedImageUi';
 import { MoreScreen } from './MoreScreen';
 import { getBalance, getDateRange, paymentTotals, roundCurrency, sumCurrency, validPayment, type Payment, type PaymentMethod } from './domain';
 import { useBodyScrollLock } from './useBodyScrollLock';
+import { getAvailableAmount, getCategoryTotals, getIncomeSummaries, getPendingPlateCount, type IncomeDeduction, type IncomeSummary } from './finance';
 import './style.css';
 
 type Product = { id: string; name: string; price: number; cost: number; active: boolean; imageId?: string };
@@ -20,8 +21,8 @@ type Customer = { id: string; name: string; phone: string };
 type Line = { productId: string; name: string; qty: number; price: number; cost: number };
 type Order = { id: string; customer: string; date: string; time: string; createdAt?: string; items: Line[]; total: number; paid: number; payments?: Payment[]; status: 'Pendiente' | 'Entregado' | 'Cancelado'; method: string; note: string };
 type Expense = { id: string; amount: number; category: string; date: string; note: string; method?: string };
-type Income = { id: string; amount: number; category: string; date: string; note: string };
-type Data = { products: Product[]; customers: Customer[]; orders: Order[]; expenses: Expense[]; incomes: Income[]; categories: string[]; business: string; businessLogoId?: string };
+type Income = { id: string; amount: number; category: string; date: string; note: string; method?: string; payments?: Payment[]; source?: 'manual' };
+type Data = { products: Product[]; customers: Customer[]; orders: Order[]; expenses: Expense[]; incomes: Income[]; incomeDeductions: IncomeDeduction[]; categories: string[]; incomeCategories: string[]; business: string; businessLogoId?: string };
 type Page = 'Inicio' | 'Vender' | 'Pedidos' | 'Dinero' | 'Más';
 
 const OWNER_UID = '4iftAGoQawabSz1EEpKufdPQccC2';
@@ -31,15 +32,16 @@ const seed: Data = {
     { id: 'p1', name: 'Picante de pollo', price: 35, cost: 19, active: true },
     { id: 'p2', name: 'Silpancho', price: 32, cost: 18, active: true },
     { id: 'p3', name: 'Falso conejo', price: 30, cost: 16, active: true },
-  ], customers: [], orders: [], expenses: [], incomes: [],
+  ], customers: [], orders: [], expenses: [], incomes: [], incomeDeductions: [],
   categories: ['Ingredientes', 'Verduras', 'Carnes', 'Transporte', 'Gas', 'Envases', 'Servicios', 'Otros'],
+  incomeCategories: ['Venta de comida', 'Otros ingresos'],
 };
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(new Date());
 
 const money = (value: number) => `Bs ${Number(value || 0).toFixed(2)}`;
 const uid = () => crypto.randomUUID();
 function load(): Data {
-  try { const saved = JSON.parse(localStorage.getItem('cielito-data') || '{}'); return { ...seed, ...saved, incomes: saved.incomes || [], categories: saved.categories || seed.categories }; }
+  try { const saved = JSON.parse(localStorage.getItem('cielito-data') || '{}'); return { ...seed, ...saved, incomes: saved.incomes || [], incomeDeductions: saved.incomeDeductions || [], categories: saved.categories || seed.categories, incomeCategories: saved.incomeCategories || seed.incomeCategories }; }
   catch { return seed; }
 }
 
@@ -143,10 +145,8 @@ function App() {
     scan(); const interval = window.setInterval(scan, 15_000); return () => window.clearInterval(interval);
   }, [data.orders]);
 
-  const ordersToday = data.orders.filter(order => order.date === selectedDate && order.status !== 'Cancelado');
   const pending = data.orders.filter(order => order.status === 'Pendiente').sort((a, b) => a.date.localeCompare(b.date) || (a.time || '99:99').localeCompare(b.time || '99:99'));
-  const collected = data.orders.flatMap(order => getOrderPayments(order)).filter(payment => localDate(payment.date) === selectedDate).reduce((sum, payment) => sum + payment.amount, 0);
-  const due = ordersToday.reduce((sum, order) => sum + getBalance(order.total, order.paid), 0);
+  const pendingPlates = getPendingPlateCount(pending);
   const nav = [
     ['Inicio', Home], ['Vender', ShoppingBasket], ['Pedidos', ClipboardList], ['Dinero', Wallet], ['Más', Menu],
   ] as const;
@@ -172,6 +172,50 @@ function App() {
     if (!await update({ ...data, expenses: exists ? data.expenses.map(expense => expense.id === value.id ? value : expense) : [value, ...data.expenses] })) return;
     setModal(''); ping(exists ? 'Gasto actualizado' : 'Gasto guardado');
   };
+  const saveIncome = async (value: Income) => {
+    const exists = data.incomes.some(income => income.id === value.id);
+    const normalized = { ...value, source: 'manual' as const };
+    if (sumCurrency(normalized.payments?.map(payment => payment.amount) || []) !== normalized.amount) { ping('Los medios de pago deben sumar exactamente el monto recibido.'); return false; }
+    const linkedDiscounts = sumCurrency(data.incomeDeductions.filter(item => item.incomeId === `manual:${value.id}`).map(item => item.amount));
+    if (linkedDiscounts > normalized.amount) { ping('El monto no puede ser menor que los descuentos ya vinculados.'); return false; }
+    if (!await update({ ...data, incomes: exists ? data.incomes.map(income => income.id === value.id ? normalized : income) : [normalized, ...data.incomes] })) return false;
+    setModal(''); ping(exists ? 'Ingreso actualizado' : 'Ingreso guardado');
+    return true;
+  };
+  const saveIncomeDeduction = async (value: IncomeDeduction) => {
+    const existing = data.incomeDeductions.find(item => item.id === value.id);
+    const income = getIncomeSummaries(data.incomes, data.orders, '0000-01-01', '9999-12-31').find(item => item.incomeId === value.incomeId);
+    if (!income) { ping('No encontramos ese ingreso.'); return false; }
+    const deductions = data.incomeDeductions.filter(item => item.incomeId === value.incomeId && item.id !== value.id);
+    const alreadyLinked = value.expenseId && data.incomeDeductions.some(item => item.expenseId === value.expenseId && item.id !== value.id);
+    if (alreadyLinked) { ping('Ese gasto ya está vinculado a un ingreso.'); return false; }
+    if (value.expenseId) {
+      const expense = data.expenses.find(item => item.id === value.expenseId);
+      if (!expense || expense.amount !== value.amount || expense.date !== value.date) { ping('El gasto vinculado debe conservar su monto y fecha originales.'); return false; }
+    }
+    if (sumCurrency([...deductions.map(item => item.amount), value.amount]) > income.amount) { ping('El descuento supera lo disponible en este ingreso.'); return false; }
+    const next = existing
+      ? data.incomeDeductions.map(item => item.id === value.id ? value : item)
+      : [value, ...data.incomeDeductions];
+    return update({ ...data, incomeDeductions: next });
+  };
+  const deleteIncomeDeduction = async (id: string) => update({ ...data, incomeDeductions: data.incomeDeductions.filter(item => item.id !== id) });
+  const deleteManualIncome = async (id: string) => {
+    if (!window.confirm('¿Eliminar este ingreso manual? Sus descuentos vinculados también se quitarán.')) return false;
+    const deductionIds = new Set(data.incomeDeductions.filter(item => item.incomeId === `manual:${id}`).map(item => item.id));
+    if (!await update({ ...data, incomes: data.incomes.filter(item => item.id !== id), incomeDeductions: data.incomeDeductions.filter(item => !deductionIds.has(item.id)) })) return false;
+    ping('Ingreso eliminado'); return true;
+  };
+  const deleteExpense = async (id: string) => {
+    if (!window.confirm('¿Eliminar este gasto? Esta acción no se puede deshacer.')) return false;
+    const nextDeductions = data.incomeDeductions.map(item => {
+      if (item.expenseId !== id) return item;
+      const { expenseId: _expenseId, ...snapshot } = item;
+      return snapshot;
+    });
+    if (!await update({ ...data, expenses: data.expenses.filter(expense => expense.id !== id), incomeDeductions: nextDeductions })) return false;
+    ping('Gasto eliminado'); return true;
+  };
   const install = () => { if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => ping('No se pudo instalar ahora.')); ping('Usa “Añadir a pantalla de inicio” en el menú del navegador.'); };
 
   if (authLoading) return <main className="login"><div className="login-card loading-card"><BrandMark/><p>Preparando Cielito…</p></div></main>;
@@ -193,10 +237,10 @@ function App() {
     <main className="main">
       <header className="topbar"><div className="mobile-brand"><BrandMark/><b>Cielito</b></div><div className="crumb">{page}<span>/</span><b>{page === 'Inicio' ? 'Tu día, con calma' : data.business}</b></div><div className="top-actions"><span className="connection"><span className={`dot ${cloud ? 'online' : ''}`}/>{cloud ? 'Sincronizado' : user ? 'Sin conexión' : 'Este dispositivo'}</span><button className="icon-button" onClick={() => setPage('Más')} aria-label="Abrir Configuración" title="Configuración"><Settings size={19}/></button><button className="avatar" onClick={() => setPage('Más')} aria-label="Abrir menú">{data.business.slice(0, 1).toUpperCase()}</button></div></header>
       <div className="content">
-        {page === 'Inicio' && <HomeScreen date={selectedDate} setDate={setSelectedDate} orders={ordersToday} pending={pending} collected={collected} due={due} onSell={() => setPage('Vender')} onExpense={() => setModal('expense')} onOpen={id => setModal(`detail:${id}`)} onDone={markDone} onHistory={() => setPage('Pedidos')}/>}
+        {page === 'Inicio' && <HomeScreen data={data} pendingPlates={pendingPlates} onExpense={() => setModal('expense')} onIncome={() => setModal('income')} onOrders={() => setPage('Pedidos')}/>}
         {page === 'Vender' && <Sell products={data.products.filter(product => product.active)} customers={data.customers} uid={user?.uid} onSave={addOrder} onCustomer={addCustomer}/>}
         {page === 'Pedidos' && <History data={data} date={selectedDate} setDate={setSelectedDate} onNew={() => setPage('Vender')} onOpen={id => setModal(`detail:${id}`)}/>}
-        {page === 'Dinero' && <Money data={data} onExpense={() => setModal('expense')} onIncome={() => setModal('income')} onEditExpense={id => setModal(`expense:${id}`)} onDeleteExpense={async id => { if (window.confirm('¿Eliminar este gasto? Esta acción no se puede deshacer.') && await update({ ...data, expenses: data.expenses.filter(expense => expense.id !== id) })) ping('Gasto eliminado'); }}/ >}
+        {page === 'Dinero' && <Money data={data} onExpense={() => setModal('expense')} onIncome={() => setModal('income')} onEditExpense={id => setModal(`expense:${id}`)} onDeleteExpense={id => void deleteExpense(id)} onEditIncome={id => setModal(`income:${id}`)} onDeleteIncome={id => void deleteManualIncome(id)} onSaveDeduction={saveIncomeDeduction} onDeleteDeduction={deleteIncomeDeduction} onOpenOrder={id => setModal(`detail:${id}`)}/>}
         {page === 'Más' && <MoreScreen products={data.products} customers={data.customers} business={data.business} businessLogoId={data.businessLogoId} uid={user?.uid}
           onAddProduct={async (name, price, cost) => update({ ...data, products: [{ id: uid(), name, price, cost, active: true }, ...data.products] })}
           onEditProduct={edited => update({ ...data, products: data.products.map(product => product.id === edited.id ? edited : product) })}
@@ -212,7 +256,8 @@ function App() {
     </main>
     <nav className="mobile-nav">{nav.map(([name, Icon]) => <button className={page === name ? 'active' : ''} key={name} onClick={() => setPage(name)}><Icon size={20}/><span>{name}</span></button>)}</nav>
     {updateReady && <div className="update-banner" role="status"><span>Hay una versión nueva lista. Actualiza cuando termines lo que estás haciendo.</span><button onClick={() => window.location.reload()}>Actualizar</button></div>}
-    {(modal === 'expense' || modal === 'income' || modal.startsWith('expense:')) && <ExpenseModal categories={modal === 'income' ? ['Venta adicional', 'Otro'] : data.categories} expense={modal.startsWith('expense:') ? data.expenses.find(item => item.id === modal.split(':')[1]) : undefined} income={modal === 'income'} onCategory={category => update({ ...data, categories: data.categories.includes(category) ? data.categories : [...data.categories, category] })} onClose={() => setModal('')} onSave={saveExpense} onIncomeSave={async (amount, category, date, note) => { if (await update({ ...data, incomes: [{ id: uid(), amount, category, date, note }, ...data.incomes] })) { setModal(''); ping('Ingreso guardado'); return true; } return false; }}/ >}
+    {(modal === 'expense' || modal.startsWith('expense:')) && <ExpenseModal categories={data.categories} expense={modal.startsWith('expense:') ? data.expenses.find(item => item.id === modal.split(':')[1]) : undefined} income={false} onCategory={category => update({ ...data, categories: data.categories.includes(category) ? data.categories : [...data.categories, category] })} onClose={() => setModal('')} onSave={saveExpense} onIncomeSave={async () => false}/>}
+    {(modal === 'income' || modal.startsWith('income:')) && <IncomeModal categories={data.incomeCategories} income={modal.startsWith('income:') ? data.incomes.find(item => item.id === modal.split(':')[1]) : undefined} onCategory={category => update({ ...data, incomeCategories: data.incomeCategories.includes(category) ? data.incomeCategories : [...data.incomeCategories, category] })} onClose={() => setModal('')} onSave={saveIncome}/>}
     {modal.startsWith('detail:') && <OrderDetail order={data.orders.find(order => order.id === modal.split(':')[1])} data={data} uid={user?.uid} onClose={() => setModal('')} onDone={markDone} onUpdate={async order => { if (await update({ ...data, orders: data.orders.map(item => item.id === order.id ? order : item) })) { ping('Pedido actualizado'); return true; } return false; }} onAddPayment={async (id, amount, method) => {
       const order = data.orders.find(item => item.id === id);
       if (!order || !validPayment(order.total, order.paid, amount)) { ping(`El saldo disponible es ${money(getBalance(order?.total || 0, order?.paid || 0))}.`); return false; }
@@ -239,22 +284,19 @@ function Login({ email, setEmail, password, setPassword, showPassword, setShowPa
   </form><div className="login-private">Acceso privado · Si tienes problemas, pide ayuda a quien administra el negocio.</div></section><div className="login-footer">Hecho para que el día vaya más tranquilo.</div></main>;
 }
 
-function HomeScreen({ date, setDate, orders, pending, collected, due, onSell, onExpense, onOpen, onDone, onHistory }: {
-  date: string; setDate: (date: string) => void; orders: Order[]; pending: Order[]; collected: number; due: number;
-  onSell: () => void; onExpense: () => void; onOpen: (id: string) => void; onDone: (id: string) => void; onHistory: () => void;
-}) {
-  const late = pending.filter(order => order.date < today() || (order.date === today() && order.time && new Date(`${order.date}T${order.time}:00-04:00`).getTime() < Date.now()));
-  const todayLabel = new Intl.DateTimeFormat('es-BO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/La_Paz' }).format(new Date(`${date}T12:00:00-04:00`));
+function HomeScreen({ data, pendingPlates, onExpense, onIncome, onOrders }: { data: Data; pendingPlates: number; onExpense: () => void; onIncome: () => void; onOrders: () => void }) {
+  const date = today();
+  const days = getDateRange(date, 'day');
+  const todayExpenses = sumCurrency(data.expenses.filter(item => item.date === date).map(item => item.amount));
+  const todayIncome = sumCurrency(getIncomeSummaries(data.incomes, data.orders, days.from, days.to).map(item => item.periodAmount));
+  const lateOrders = data.orders.filter(order => order.status === 'Pendiente' && (order.date < date || (order.date === date && order.time && new Date(`${order.date}T${order.time}:00-04:00`).getTime() < Date.now())));
   return <>
-    <div className="welcome-row"><div><div className="eyebrow">{todayLabel}</div><h1>Hola, bienvenida</h1><p>Esto es lo que necesita atención hoy.</p></div><label className="date-select"><CalendarDays size={17}/><input aria-label="Fecha de inicio" type="date" value={date} onChange={event => setDate(event.target.value)}/></label></div>
-    <div className="home-actions"><button className="primary" onClick={onSell}><Plus size={20}/>Nuevo pedido</button><button className="secondary" onClick={onExpense}><Plus size={19}/>Registrar gasto</button></div>
-    <div className="home-summary"><div><span>Pedidos del día</span><b>{orders.length}</b></div><div><span>Dinero cobrado</span><b>{money(collected)}</b></div><div><span>Por cobrar</span><b>{money(due)}</b></div></div>
-    {late.length > 0 && <section className="late-banner"><Clock3 size={20}/><div><b>{late.length} {late.length === 1 ? 'pedido atrasado' : 'pedidos atrasados'}</b><span>Revisa la entrega y actualiza su estado.</span></div><button className="text-button" onClick={onHistory}>Revisar</button></section>}
-    <div className="section-head home-section-head"><div><div className="eyebrow">LO QUE SIGUE</div><h2>Entregas pendientes <span className="count-pill">{pending.length}</span></h2></div><button className="link-button" onClick={onHistory}>Ver historial <ChevronRight size={16}/></button></div>
-    <div className="orders-list">{pending.length ? pending.map(order => <OrderRow key={order.id} order={order} onOpen={() => onOpen(order.id)} onDone={() => onDone(order.id)}/>) : <div className="empty"><div className="empty-icon"><Check size={23}/></div><b>Todo al día</b><p>Cuando haya una entrega aparecerá aquí.</p><button className="secondary" onClick={onSell}><Plus size={16}/>Crear pedido</button></div>}</div>
+    <div className="welcome-row"><div><div className="eyebrow">{new Intl.DateTimeFormat('es-BO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/La_Paz' }).format(new Date(`${date}T12:00:00-04:00`))}</div><h1>Hola, bienvenida</h1><p>Un resumen claro para empezar el día.</p></div></div>
+    <section className="home-finance-summary"><div><span>Gastos de hoy</span><b>{money(todayExpenses)}</b></div><div><span>Ingresos de hoy</span><b>{money(todayIncome)}</b></div></section>
+    <section className="home-primary-actions"><button className="home-action expense-action" onClick={onExpense}><span className="home-action-icon"><Wallet size={25}/></span><span><small>ANOTAR UNA SALIDA</small><b>Nuevo gasto</b></span><Plus size={22}/></button><button className="home-action income-action" onClick={onIncome}><span className="home-action-icon"><Download size={25}/></span><span><small>ANOTAR UNA ENTRADA</small><b>Nuevo ingreso</b></span><Plus size={22}/></button></section>
+    <button className="home-pending-link" onClick={onOrders}><span><b>{pendingPlates} {pendingPlates === 1 ? 'plato pendiente' : 'platos pendientes'}</b><small>{lateOrders.length ? `${lateOrders.length} ${lateOrders.length === 1 ? 'pedido atrasado' : 'pedidos atrasados'} · Revisar pedidos` : 'Ver entregas y pedidos'}</small></span><ChevronRight size={20}/></button>
   </>;
 }
-
 function OrderRow({ order, onOpen, onDone }: { order: Order; onOpen: () => void; onDone: () => void }) {
   const balance = getBalance(order.total, order.paid);
   const late = order.status === 'Pendiente' && (order.date < today() || (order.date === today() && !!order.time && new Date(`${order.date}T${order.time}:00-04:00`).getTime() < Date.now()));
@@ -345,48 +387,86 @@ function History({ data, date, setDate, onNew, onOpen }: { data: Data; date: str
       && (paymentStatus === 'Todos' || paymentStatus === paidStatus)
       && `${order.customer} ${order.items.map(item => item.name).join(' ')}`.toLowerCase().includes(query.toLowerCase());
   });
+  const pendingPlatesInPeriod = getPendingPlateCount(data.orders.filter(order => order.status === 'Pendiente' && order.date >= days.from && order.date <= days.to));
   return <>
     <div className="page-title"><div><div className="eyebrow">TU HISTORIAL</div><h1>Pedidos y recibos</h1><p>Consulta entregas y comprobantes de cualquier fecha.</p></div><button className="primary" onClick={onNew}><Plus size={18}/>Nuevo pedido</button></div>
     <div className="history-tabs"><button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}><ClipboardList size={17}/>Pedidos</button><button className={tab === 'receipts' ? 'active' : ''} onClick={() => setTab('receipts')}><Download size={17}/>Recibos</button></div>
     <div className="history-filters"><div className="date-shortcuts"><button onClick={() => setDate(offsetDate(date, -1))}>Ayer</button><button className={date === today() ? 'selected' : ''} onClick={() => setDate(today())}>Hoy</button><label className="date-select"><CalendarDays size={17}/><input aria-label="Elegir fecha" type="date" value={date} onChange={event => setDate(event.target.value)}/></label></div><div className="segmented">{(['day', 'week', 'month'] as const).map(key => <button key={key} className={range === key ? 'selected' : ''} onClick={() => setRange(key)}>{key === 'day' ? 'Día' : key === 'week' ? 'Semana' : 'Mes'}</button>)}</div><label className="search"><Search size={18}/><input aria-label="Buscar pedido" placeholder="Buscar por cliente o plato" value={query} onChange={event => setQuery(event.target.value)}/></label></div>
     <label className="payment-filter">Estado del pago<select value={paymentStatus} onChange={event => setPaymentStatus(event.target.value)}><option>Todos</option><option>Pendiente</option><option>Parcial</option><option>Pagado</option></select></label>
-    {tab === 'orders' && <><div className="filter-tabs">{['Todos', 'Pendiente', 'Entregado', 'Cancelado'].map(key => <button key={key} className={status === key ? 'selected' : ''} onClick={() => setStatus(key)}>{key === 'Pendiente' ? 'Pendientes' : key === 'Entregado' ? 'Entregados' : key === 'Cancelado' ? 'Cancelados' : key}<b>{data.orders.filter(order => order.date >= days.from && order.date <= days.to && (key === 'Todos' || order.status === key)).length}</b></button>)}</div><div className="orders-list">{orders.map(order => <OrderRow key={order.id} order={order} onOpen={() => onOpen(order.id)} onDone={() => onOpen(order.id)}/>)}{!orders.length && <div className="empty"><b>No hay pedidos en este período</b><p>Prueba con otra fecha o registra un pedido nuevo.</p><button className="secondary" onClick={onNew}><Plus size={17}/>Nuevo pedido</button></div>}</div></>}
+    {tab === 'orders' && <><div className="pending-plate-summary"><b>{pendingPlatesInPeriod} {pendingPlatesInPeriod === 1 ? 'plato pendiente' : 'platos pendientes'}</b><span>En {data.orders.filter(order => order.status === 'Pendiente' && order.date >= days.from && order.date <= days.to).length} pedidos de este período</span></div><div className="filter-tabs">{['Todos', 'Pendiente', 'Entregado', 'Cancelado'].map(key => <button key={key} className={status === key ? 'selected' : ''} onClick={() => setStatus(key)}>{key === 'Pendiente' ? 'Pendientes' : key === 'Entregado' ? 'Entregados' : key === 'Cancelado' ? 'Cancelados' : key}<b>{data.orders.filter(order => order.date >= days.from && order.date <= days.to && (key === 'Todos' || order.status === key)).length}</b></button>)}</div><div className="orders-list">{orders.map(order => <OrderRow key={order.id} order={order} onOpen={() => onOpen(order.id)} onDone={() => onOpen(order.id)}/>)}{!orders.length && <div className="empty"><b>No hay pedidos en este período</b><p>Prueba con otra fecha o registra un pedido nuevo.</p><button className="secondary" onClick={onNew}><Plus size={17}/>Nuevo pedido</button></div>}</div></>}
     {tab === 'receipts' && <div className="receipt-list">{orders.map(order => <article className="receipt-row" key={order.id}><div className="receipt-icon"><Download size={19}/></div><div><b>{order.customer || 'Venta sin cliente'}</b><span>{order.date}{order.time ? ` · ${order.time}` : ''} · {order.items.length} {order.items.length === 1 ? 'plato' : 'platos'}</span></div><div className="receipt-amount"><b>{money(order.total)}</b><small>{getBalance(order.total, order.paid) ? `Saldo ${money(getBalance(order.total, order.paid))}` : 'Pagado'}</small></div><button className="secondary" onClick={() => onOpen(order.id)}>Abrir recibo</button></article>)}{!orders.length && <div className="empty"><b>No hay recibos para mostrar</b><p>Los comprobantes de los pedidos aparecerán aquí.</p></div>}</div>}
   </>;
 }
 
-function Money({ data, onExpense, onIncome, onEditExpense, onDeleteExpense }: { data: Data; onExpense: () => void; onIncome: () => void; onEditExpense: (id: string) => void; onDeleteExpense: (id: string) => void }) {
+function Money({ data, onExpense, onIncome, onEditExpense, onDeleteExpense, onEditIncome, onDeleteIncome, onSaveDeduction, onDeleteDeduction, onOpenOrder }: {
+  data: Data; onExpense: () => void; onIncome: () => void; onEditExpense: (id: string) => void; onDeleteExpense: (id: string) => void;
+  onEditIncome: (id: string) => void; onDeleteIncome: (id: string) => void;
+  onSaveDeduction: (item: IncomeDeduction) => Promise<boolean>; onDeleteDeduction: (id: string) => Promise<boolean>;
+  onOpenOrder: (id: string) => void;
+}) {
+  const [tab, setTab] = useState<'expenses' | 'income'>('expenses');
   const [date, setDate] = useState(today());
-  const [range, setRange] = useState<'day' | 'week' | 'month'>('day');
-  const days = getDateRange(date, range);
-  const periodOrders = data.orders.filter(order => order.date >= days.from && order.date <= days.to);
-  const orders = periodOrders.filter(order => order.status !== 'Cancelado');
-  const expenses = data.expenses.filter(expense => expense.date >= days.from && expense.date <= days.to);
-  const incomes = data.incomes.filter(income => income.date >= days.from && income.date <= days.to);
-  const periodPayments = data.orders.flatMap(order => getOrderPayments(order).filter(payment => localDate(payment.date) >= days.from && localDate(payment.date) <= days.to).map(payment => ({ order, payment })));
-  const sales = periodPayments.reduce((sum, row) => sum + row.payment.amount, 0);
-  const outstanding = orders.reduce((sum, order) => sum + getBalance(order.total, order.paid), 0);
-  const extra = incomes.reduce((sum, income) => sum + income.amount, 0);
-  const spent = expenses.reduce((sum, expense) => sum + expense.amount, 0);
-  const balance = sales + extra - spent;
-  const movements = [
-    ...periodPayments.map(({ order, payment }) => ({ id: payment.id, title: order.status === 'Cancelado' ? `Pedido cancelado · ${order.customer || 'Venta sin cliente'}` : order.customer || 'Venta sin cliente', detail: order.items.map(item => `${item.qty} × ${item.name}`).join(' · '), amount: payment.amount, date: localDate(payment.date), kind: 'income' as const, category: payment.method })),
-    ...incomes.map(income => ({ id: income.id, title: income.note || 'Otro ingreso', detail: income.category, amount: income.amount, date: income.date, kind: 'income' as const, category: income.category })),
-    ...expenses.map(expense => ({ id: expense.id, title: expense.note || 'Gasto de cocina', detail: expense.category, amount: expense.amount, date: expense.date, kind: 'expense' as const, category: expense.category })),
-  ].sort((a, b) => b.date.localeCompare(a.date));
-  const estimatedMargin = orders.filter(order => order.status === 'Entregado').reduce((sum, order) => sum + order.items.reduce((lineSum, item) => lineSum + item.qty * (item.price - item.cost), 0), 0);
+  const [range, setRange] = useState<'day' | 'yesterday' | 'week' | 'month' | 'custom'>('day');
+  const [from, setFrom] = useState(today()); const [to, setTo] = useState(today());
+  const [categoryFilter, setCategoryFilter] = useState(''); const [selectedIncome, setSelectedIncome] = useState<IncomeSummary | null>(null);
+  const days = range === 'custom' ? { from, to } : getDateRange(range === 'yesterday' ? offsetDate(date, -1) : date, range === 'yesterday' ? 'day' : range);
+  const expenses = data.expenses.filter(item => item.date >= days.from && item.date <= days.to);
+  const summaries = getIncomeSummaries(data.incomes, data.orders, days.from, days.to);
+  const incomeInPeriod = sumCurrency(summaries.map(row => row.periodAmount));
+  const includedIncomeIds = new Set(summaries.map(row => row.incomeId));
+  const deductionRows = data.incomeDeductions.filter(item => includedIncomeIds.has(item.incomeId) && item.date >= days.from && item.date <= days.to);
+  const discounts = sumCurrency(deductionRows.map(item => item.amount));
+  const available = sumCurrency(summaries.map(row => Math.max(0, row.periodAmount - sumCurrency(deductionRows.filter(item => item.incomeId === row.incomeId).map(item => item.amount)))));
+  const spent = sumCurrency(expenses.map(item => item.amount));
+  const grouped = getCategoryTotals(expenses);
+  const visibleExpenses = categoryFilter ? expenses.filter(item => item.category === categoryFilter) : expenses;
   return <>
-    <div className="page-title"><div><div className="eyebrow">CUENTAS CLARAS</div><h1>Dinero</h1><p>Entradas, gastos y saldos del período.</p></div><div className="money-actions"><button className="secondary" onClick={onIncome}><Plus size={17}/>Otro ingreso</button><button className="primary" onClick={onExpense}><Plus size={17}/>Registrar gasto</button></div></div>
-    <div className="money-period"><div className="segmented">{(['day', 'week', 'month'] as const).map(key => <button key={key} className={range === key ? 'selected' : ''} onClick={() => setRange(key)}>{key === 'day' ? 'Día' : key === 'week' ? 'Semana' : 'Mes'}</button>)}</div><label className="date-select"><CalendarDays size={17}/><input aria-label="Fecha de resumen" type="date" value={date} onChange={event => setDate(event.target.value)}/></label></div>
-    <section className="money-overview"><div className="money-primary"><span>Dinero que entró</span><b>{money(sales + extra)}</b><small>Solo cobros registrados en este período</small></div><div><span>Dinero que salió</span><b>{money(spent)}</b></div><div><span>Te queda en caja</span><b>{money(balance)}</b><small>Entradas menos gastos</small></div><div><span>Por cobrar</span><b>{money(outstanding)}</b></div></section>
-    <div className="money-note">Margen estimado de pedidos entregados: <b>{money(estimatedMargin)}</b>. Usa el costo guardado en cada pedido y no resta nuevamente los gastos reales.</div>
-    <div className="section-head"><div><div className="eyebrow">MOVIMIENTOS</div><h2>Actividad reciente</h2></div><button className="secondary" onClick={() => exportCsv('movimientos-cielito.csv', ['Tipo', 'Fecha', 'Detalle', 'Categoría', 'Monto'], movements.map(item => [item.kind === 'income' ? 'Ingreso' : 'Gasto', item.date, item.title, item.category, item.kind === 'income' ? item.amount : -item.amount]))}><Download size={16}/>Exportar</button></div>
-    {periodPayments.some(({ order }) => order.status === 'Cancelado') && <p className="money-note">Los abonos de pedidos cancelados siguen como dinero recibido. Si devolviste el monto, regístralo como gasto de reembolso.</p>}
-    <div className="movement-list">{movements.map(item => <article className="movement-row" key={item.id}><span className={`movement-sign ${item.kind}`}>{item.kind === 'income' ? '+' : '−'}</span><div className="movement-copy"><b>{item.title}</b><span>{item.detail} · {formatReadableDate(item.date)}</span></div><b className={`movement-amount ${item.kind}`}>{item.kind === 'income' ? '+' : '−'} {money(item.amount)}</b>{item.kind === 'expense' && <div className="row-actions"><button className="icon-button" onClick={() => onEditExpense(item.id)} aria-label="Editar gasto"><Settings size={17}/></button><button className="icon-button danger-icon" onClick={() => onDeleteExpense(item.id)} aria-label="Eliminar gasto"><Trash2 size={17}/></button></div>}</article>)}{!movements.length && <div className="empty"><b>No hay movimientos en este período</b><p>Cuando registres cobros o gastos, aparecerán aquí.</p></div>}</div>
+    <div className="page-title"><div><div className="eyebrow">CUENTAS CLARAS</div><h1>Dinero</h1><p>Los gastos generales y los ingresos se llevan por separado.</p></div><div className="money-actions"><button className="secondary" onClick={onIncome}><Plus size={17}/>Nuevo ingreso</button><button className="primary" onClick={onExpense}><Plus size={17}/>Nuevo gasto</button></div></div>
+    <div className="history-tabs money-tabs"><button className={tab === 'expenses' ? 'active' : ''} onClick={() => { setTab('expenses'); setCategoryFilter(''); }}><Wallet size={17}/>Gastos</button><button className={tab === 'income' ? 'active' : ''} onClick={() => setTab('income')}><Download size={17}/>Ingresos</button></div>
+    <div className="money-period"><div className="segmented">{(['day', 'yesterday', 'week', 'month', 'custom'] as const).map(key => <button key={key} className={range === key ? 'selected' : ''} onClick={() => setRange(key)}>{key === 'day' ? 'Hoy' : key === 'yesterday' ? 'Ayer' : key === 'week' ? 'Semana' : key === 'month' ? 'Mes' : 'Fechas'}</button>)}</div>{range === 'custom' ? <div className="custom-range"><label>Desde<input type="date" value={from} onChange={event => setFrom(event.target.value)}/></label><label>Hasta<input type="date" value={to} onChange={event => setTo(event.target.value)}/></label></div> : <label className="date-select"><CalendarDays size={17}/><input aria-label="Fecha del resumen" type="date" value={date} onChange={event => setDate(event.target.value)}/></label>}</div>
+    {tab === 'expenses' ? <>
+      <section className="money-overview expense-overview"><div><span>Gastos del período</span><b>{money(spent)}</b><small>No se descuentan de los ingresos</small></div><div><span>Movimientos</span><b>{expenses.length}</b><small>Gastos registrados</small></div></section>
+      <div className="section-head"><div><div className="eyebrow">POR CATEGORÍA</div><h2>Resumen de gastos</h2></div><button className="text-button" onClick={() => setCategoryFilter('')}>Ver todos</button></div>
+      <div className="category-totals">{grouped.map(item => <button className={categoryFilter === item.category ? 'selected' : ''} key={item.category} onClick={() => setCategoryFilter(categoryFilter === item.category ? '' : item.category)}><span>{item.category}</span><b>{money(item.amount)}</b><small>{expenses.filter(expense => expense.category === item.category).length} gastos</small></button>)}</div>
+      <div className="section-head"><div><div className="eyebrow">{categoryFilter || 'TODOS LOS GASTOS'}</div><h2>{categoryFilter ? `Gastos: ${categoryFilter}` : 'Movimientos'}</h2></div></div>
+      <div className="movement-list">{[...visibleExpenses].sort((a,b) => b.date.localeCompare(a.date)).map(item => <article className="movement-row" key={item.id}><span className="movement-sign expense">−</span><div className="movement-copy"><b>{item.note || 'Gasto'}</b><span>{item.category} · {formatReadableDate(item.date)}{item.method ? ` · ${item.method}` : ''}</span></div><b className="movement-amount expense">− {money(item.amount)}</b><div className="row-actions"><button className="icon-button" onClick={() => onEditExpense(item.id)} aria-label="Editar gasto"><Settings size={17}/></button><button className="icon-button danger-icon" onClick={() => onDeleteExpense(item.id)} aria-label="Eliminar gasto"><Trash2 size={17}/></button></div></article>)}{!visibleExpenses.length && <div className="empty"><b>No hay gastos en este período</b><p>Registra un gasto para empezar el seguimiento.</p><button className="primary" onClick={onExpense}><Plus size={17}/>Nuevo gasto</button></div>}</div>
+    </> : <>
+      <section className="money-overview income-overview"><div><span>Dinero recibido</span><b>{money(incomeInPeriod)}</b><small>Pagos con fecha dentro del período</small></div><div><span>Descuentos vinculados</span><b>{money(discounts)}</b><small>Registrados en este período</small></div><div><span>Disponible de los ingresos</span><b>{money(available)}</b><small>No incluye gastos generales</small></div></section>
+      <div className="income-help">Las ventas aparecen cuando se marcan entregadas. El importe refleja únicamente los pagos reales registrados; los saldos pendientes se muestran aparte.</div>
+      <div className="section-head"><div><div className="eyebrow">INGRESOS</div><h2>Actividad por fecha de cobro</h2></div><button className="secondary" onClick={onIncome}><Plus size={16}/>Otro ingreso</button></div>
+      <div className="income-list">{summaries.map(row => {
+        const rowDeductions = data.incomeDeductions.filter(item => item.incomeId === row.incomeId);
+        const periodDiscount = sumCurrency(rowDeductions.filter(item => item.date >= days.from && item.date <= days.to).map(item => item.amount));
+        return <article className="income-row" key={row.id}><button className="income-row-main" onClick={() => setSelectedIncome(row)}><span className={`movement-sign ${row.source === 'sale' ? 'income' : 'manual'}`}>{row.source === 'sale' ? '+' : '•'}</span><span className="movement-copy"><b>{row.title}</b><span>{row.category} · {formatReadableDate(row.date)} · {row.source === 'sale' ? 'Venta entregada' : 'Ingreso manual'}</span></span><span className="income-row-amount"><b>{money(row.periodAmount)}</b>{row.source === 'sale' && <small>{row.balanceDue ? `Saldo del pedido ${money(row.balanceDue)}` : `Total vendido ${money(row.totalSold || 0)}`}</small>}</span></button>{periodDiscount > 0 && <small className="income-discount-note">Descuentos vinculados en este período: {money(periodDiscount)}</small>}</article>;
+      })}{!summaries.length && <div className="empty"><b>No hay ingresos en este período</b><p>Solo se muestran pagos reales y ventas entregadas.</p><button className="primary" onClick={onIncome}><Plus size={17}/>Registrar ingreso</button></div>}</div>
+    </>}
+    {selectedIncome && <IncomeDetail income={selectedIncome} data={data} onClose={() => setSelectedIncome(null)} onSaveDiscount={onSaveDeduction} onDeleteDiscount={async id => { if (window.confirm('¿Eliminar este descuento vinculado?')) await onDeleteDeduction(id); }} onEdit={() => { setSelectedIncome(null); if (selectedIncome.source === 'manual') onEditIncome(selectedIncome.incomeId.slice('manual:'.length)); }} onDelete={() => { setSelectedIncome(null); if (selectedIncome.source === 'manual') onDeleteIncome(selectedIncome.incomeId.slice('manual:'.length)); }} onOpenOrder={() => { setSelectedIncome(null); if (selectedIncome.order) onOpenOrder(selectedIncome.order.id); }}/ >}
   </>;
 }
 
-function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave, onIncomeSave }: { categories: string[]; expense?: Expense; income: boolean; onCategory: (category: string) => Promise<boolean>; onClose: () => void; onSave: (expense: Expense) => Promise<void>; onIncomeSave: (amount: number, category: string, date: string, note: string) => Promise<boolean> }) {
+function IncomeDetail({ income, data, onClose, onSaveDiscount, onDeleteDiscount, onEdit, onDelete, onOpenOrder }: { income: IncomeSummary; data: Data; onClose: () => void; onSaveDiscount: (item: IncomeDeduction) => Promise<boolean>; onDeleteDiscount: (id: string) => void; onEdit: () => void; onDelete: () => void; onOpenOrder: () => void }) {
+  const [adding, setAdding] = useState(false); const [note, setNote] = useState(''); const [amount, setAmount] = useState(''); const [expenseId, setExpenseId] = useState(''); const [discountDate, setDiscountDate] = useState(today()); const [discountCategory, setDiscountCategory] = useState(''); const [editingDeduction, setEditingDeduction] = useState<IncomeDeduction | null>(null); const [saving, setSaving] = useState(false);
+  const deductions = data.incomeDeductions.filter(item => item.incomeId === income.incomeId).sort((a,b) => b.date.localeCompare(a.date));
+  const linkedExpenses = new Set(data.incomeDeductions.flatMap(item => item.expenseId ? [item.expenseId] : []));
+  const linkableExpenses = data.expenses.filter(item => !linkedExpenses.has(item.id) || item.id === editingDeduction?.expenseId);
+  const totalDeducted = sumCurrency(deductions.map(item => item.amount));
+  const methods = income.payments.reduce((acc, payment) => { acc[payment.method] = sumCurrency([acc[payment.method] || 0, payment.amount]); return acc; }, {} as Record<string, number>);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className="modal income-detail-modal" role="dialog" aria-modal="true"><header className="detail-header"><button className="back-button" onClick={onClose} aria-label="Volver"><ArrowLeft size={20}/></button><div><div className="eyebrow">DETALLE DEL INGRESO</div><h2>{income.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X/></button></header><div className="detail-body"><div className="receipt-totals"><div><span>Recibido en período</span><b>{money(income.periodAmount)}</b></div><div><span>Total del ingreso</span><b>{money(income.amount)}</b></div>{income.order && <div className="income-sale-items"><b>Pedido · {formatReadableDate(income.order.date)}</b>{income.order.items.map((item, index) => <span key={`${income.order?.id}-${index}`}>{item.qty} × {item.name} · {money(item.price * item.qty)}</span>)}</div>}{income.totalSold !== undefined && <><div><span>Total vendido</span><b>{money(income.totalSold)}</b></div><div><span>Saldo del pedido</span><b>{money(income.balanceDue || 0)}</b></div></>}<div><span>Descuentos vinculados</span><b>{money(totalDeducted)}</b></div><div><span>Disponible</span><b>{money(getAvailableAmount(income, data.incomeDeductions))}</b></div></div><div className="payment-breakdown"><b>Pagos por forma</b><span>{Object.entries(methods).map(([method, amount]) => `${method}: ${money(amount)}`).join(' · ') || 'Sin cobros registrados'}</span>{income.payments.map(payment => <div className="payment-entry" key={payment.id}><span>{payment.method} · {formatReadableDate(localDate(payment.date))}</span><b>{money(payment.amount)}</b></div>)}</div><div className="section-head"><div><div className="eyebrow">DESCUENTOS ASOCIADOS</div><h3>Costos de este ingreso</h3></div><button className="secondary" onClick={() => { setEditingDeduction(null); setNote(''); setAmount(''); setExpenseId(''); setDiscountCategory(''); setDiscountDate(today()); setAdding(!adding); }}><Plus size={16}/>{adding ? 'Cerrar' : 'Registrar descuento'}</button></div>{adding && <form className="deduction-form" onSubmit={event => { event.preventDefault(); if (saving || !note.trim() || Number(amount) <= 0) return; const expense = data.expenses.find(item => item.id === expenseId); setSaving(true); void onSaveDiscount({ id: editingDeduction?.id || uid(), incomeId: income.incomeId, amount: Number(amount), note: note.trim(), date: discountDate, ...(discountCategory ? { category: discountCategory } : expense?.category ? { category: expense.category } : {}), ...(expenseId ? { expenseId } : {}) }).then(saved => { if (saved) { setAdding(false); setEditingDeduction(null); setNote(''); setAmount(''); setExpenseId(''); } }).finally(() => setSaving(false)); }}><label className="form-label">Detalle<input required value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Compré ingredientes"/></label><div className="expense-category-date"><label className="form-label">Monto<input required type="number" min="0.01" max={getAvailableAmount(income, data.incomeDeductions) + (editingDeduction?.amount || 0)} step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="0.00"/></label><label className="form-label expense-date">Fecha<input type="date" value={discountDate} onChange={event => setDiscountDate(event.target.value)}/></label></div><label className="form-label">Categoría (opcional)<input value={discountCategory} onChange={event => setDiscountCategory(event.target.value)} placeholder="Ej. Ingredientes"/></label><label className="form-label">Vincular gasto general (opcional)<select value={expenseId} onChange={event => { const id = event.target.value; setExpenseId(id); const selected = data.expenses.find(item => item.id === id); if (selected) { setNote(selected.note); setAmount(String(selected.amount)); setDiscountDate(selected.date); setDiscountCategory(selected.category); } }}><option value="">Sin gasto asociado</option>{linkableExpenses.map(item => <option key={item.id} value={item.id}>{item.note} · {money(item.amount)} · {item.date}</option>)}</select></label><button className="primary" disabled={saving || !note.trim() || Number(amount) <= 0 || Number(amount) > getAvailableAmount(income, data.incomeDeductions) + (editingDeduction?.amount || 0)}>{saving ? 'Guardando…' : editingDeduction ? 'Guardar cambios' : 'Guardar descuento'}</button></form>}{deductions.map(item => <div className="income-deduction" key={item.id}><span><b>{item.note}</b><small>{item.category || 'Sin categoría'} · {formatReadableDate(item.date)}{item.expenseId ? ' · Gasto general vinculado' : ''}</small></span><b>{money(item.amount)}</b><button className="icon-button" onClick={() => { setEditingDeduction(item); setNote(item.note); setAmount(String(item.amount)); setExpenseId(item.expenseId || ''); setDiscountDate(item.date); setDiscountCategory(item.category || ''); setAdding(true); }} aria-label="Editar descuento"><Settings size={17}/></button><button className="icon-button danger-icon" onClick={() => onDeleteDiscount(item.id)} aria-label="Eliminar descuento"><Trash2 size={17}/></button></div>)}{!deductions.length && <p className="muted">Aún no hay costos o descuentos asociados.</p>}</div><footer className="detail-footer">{income.source === 'manual' ? <><button className="secondary" onClick={onEdit}>Editar ingreso</button><button className="danger-button" onClick={onDelete}>Eliminar ingreso</button></> : <button className="secondary" onClick={onOpenOrder}>Abrir pedido</button>}</footer></section></div>;
+}
+
+function IncomeModal({ categories, income, onCategory, onClose, onSave }: { categories: string[]; income?: Income; onCategory: (category: string) => Promise<boolean>; onClose: () => void; onSave: (income: Income) => Promise<boolean> }) {
+  useBodyScrollLock(true);
+  const [amount, setAmount] = useState(income ? String(income.amount) : '');
+  const [cash, setCash] = useState(() => String(sumCurrency((income?.payments || []).filter(payment => payment.method === 'Efectivo').map(payment => payment.amount)) || (income?.method?.toLowerCase().includes('efectivo') ? income.amount : 0) || ''));
+  const [qr, setQr] = useState(() => String(sumCurrency((income?.payments || []).filter(payment => payment.method === 'QR / transferencia').map(payment => payment.amount)) || (income?.method?.toLowerCase().includes('qr') ? income.amount : 0) || ''));
+  const [mode, setMode] = useState<'Efectivo' | 'QR / transferencia' | 'Mixto'>(() => income?.payments?.some(payment => payment.method === 'Efectivo') && income.payments.some(payment => payment.method === 'QR / transferencia') ? 'Mixto' : income?.method?.toLowerCase().includes('qr') ? 'QR / transferencia' : 'Efectivo');
+  const [category, setCategory] = useState(income?.category || categories[0] || 'Otros ingresos'); const [date, setDate] = useState(income?.date || today()); const [note, setNote] = useState(income?.note || '');
+  const [newCategory, setNewCategory] = useState(''); const [busy, setBusy] = useState(false);
+  const total = Number(amount); const cashValue = mode === 'Efectivo' ? total : mode === 'Mixto' ? Number(cash || 0) : 0; const qrValue = mode === 'QR / transferencia' ? total : mode === 'Mixto' ? Number(qr || 0) : 0; const paid = roundCurrency(cashValue + qrValue);
+  const submit = async (event: React.FormEvent) => { event.preventDefault(); if (busy || !Number.isFinite(total) || total <= 0 || paid !== roundCurrency(total) || !note.trim()) return; setBusy(true); try { const stamp = `${date}T12:00:00-04:00`; const payments: Payment[] = []; if (cashValue) payments.push({ id: income?.payments?.find(item => item.method === 'Efectivo')?.id || uid(), amount: cashValue, date: stamp, method: 'Efectivo' }); if (qrValue) payments.push({ id: income?.payments?.find(item => item.method === 'QR / transferencia')?.id || uid(), amount: qrValue, date: stamp, method: 'QR / transferencia' }); await onSave({ id: income?.id || uid(), amount: total, category, date, note: note.trim(), payments, method: mode }); } finally { setBusy(false); } };
+  const createCategory = async () => { const value = newCategory.trim(); if (!value || busy || categories.includes(value)) return; setBusy(true); try { if (await onCategory(value)) { setCategory(value); setNewCategory(''); } } finally { setBusy(false); } };
+  return <div className="modal-backdrop" role="presentation"><form className="modal expense-modal income-modal" role="dialog" aria-modal="true" onSubmit={event => void submit(event)}><button type="button" className="back-button modal-back" onClick={onClose} aria-label="Volver"><ArrowLeft size={20}/></button><div className="eyebrow">ENTRADA DE DINERO</div><h2>{income ? 'Editar ingreso' : 'Registrar un ingreso'}</h2><p>Registra solo dinero que ya recibiste.</p><label className="form-label expense-note-label">Detalle<input required value={note} onChange={event => setNote(event.target.value)} placeholder="Ej. Venta de refrescos"/></label><label className="form-label amount-label">Monto recibido <span>Bs</span><input aria-label="Monto recibido en bolivianos" type="number" min="0.01" step="0.01" required value={amount} onChange={event => { setAmount(event.target.value); if (mode === 'Efectivo') setCash(event.target.value); if (mode === 'QR / transferencia') setQr(event.target.value); }} placeholder="0.00"/></label><div className="payment-options">{(['Efectivo', 'QR / transferencia', 'Mixto'] as const).map(value => <button type="button" key={value} className={mode === value ? 'selected' : ''} onClick={() => setMode(value)}>{value}</button>)}</div>{mode === 'Mixto' && <div className="payment-split"><label className="form-label">Efectivo (Bs)<input type="number" min="0" step="0.01" value={cash} onChange={event => setCash(event.target.value)} placeholder="0.00"/></label><label className="form-label">QR / transferencia (Bs)<input type="number" min="0" step="0.01" value={qr} onChange={event => setQr(event.target.value)} placeholder="0.00"/></label><p className={paid === roundCurrency(total) ? 'success-note' : 'error'}>Distribución {money(paid)} de {money(total)}</p></div>}<div className="expense-category-date"><label className="form-label">Categoría<select value={category} onChange={event => setCategory(event.target.value)}>{categories.map(item => <option key={item}>{item}</option>)}</select></label><label className="form-label expense-date">Fecha<input type="date" value={date} onChange={event => setDate(event.target.value)}/></label></div>{newCategory !== '' ? <div className="category-add"><input aria-label="Nueva categoría" value={newCategory} onChange={event => setNewCategory(event.target.value)} placeholder="Nueva categoría"/><button type="button" className="secondary" disabled={busy || !newCategory.trim()} onClick={() => void createCategory()}>Agregar</button></div> : <button type="button" className="add-client" onClick={() => setNewCategory(' ')}><Plus size={16}/>Crear categoría</button>}<button className="primary wide expense-submit" disabled={busy || !total || paid !== roundCurrency(total) || !note.trim()}>{busy ? 'Guardando…' : income ? 'Guardar cambios' : 'Guardar ingreso'}</button></form></div>;
+}function ExpenseModal({ categories, expense, income, onCategory, onClose, onSave, onIncomeSave }: { categories: string[]; expense?: Expense; income: boolean; onCategory: (category: string) => Promise<boolean>; onClose: () => void; onSave: (expense: Expense) => Promise<void>; onIncomeSave: (amount: number, category: string, date: string, note: string) => Promise<boolean> }) {
   useBodyScrollLock(true);
   const [amount, setAmount] = useState(expense ? String(expense.amount) : '');
   const [category, setCategory] = useState(expense?.category || categories[0] || 'Otros');
@@ -446,25 +526,6 @@ function paymentLabel(payments: Payment[], paid: number, total: number) {
   return methods.size > 1 ? 'Mixto' : payments[0]?.method || 'Efectivo';
 }
 
-function legacyPaymentMethod(method: string): PaymentMethod {
-  const normalized = method.toLowerCase();
-  if (normalized.includes('qr') || normalized.includes('transfer')) return 'QR / transferencia';
-  if (normalized.includes('efectivo') || normalized.includes('cash')) return 'Efectivo';
-  return 'Otro / sin detalle';
-}
-
-function getOrderPayments(order: Order): Payment[] {
-  if (order.payments?.length) return order.payments;
-  if (!order.paid) return [];
-  return [{ id: `${order.id}-historic-payment`, amount: order.paid, date: `${order.date}T12:00:00-04:00`, method: legacyPaymentMethod(order.method) }];
-}
-
-function formatReadableDate(value: string) {
-  const parsed = new Date(value.length === 10 ? `${value}T12:00:00-04:00` : value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat('es-BO', { day: 'numeric', month: 'short', ...(value.length > 10 ? { hour: '2-digit', minute: '2-digit' } : {}), timeZone: 'America/La_Paz' }).format(parsed);
-}
-
 function localDate(value: string) {
   if (value.length === 10) return value;
   const date = new Date(value);
@@ -472,17 +533,17 @@ function localDate(value: string) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(date);
 }
 
+function formatReadableDate(value: string) {
+  const parsed = new Date(value.length === 10 ? `${value}T12:00:00-04:00` : value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat('es-BO', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/La_Paz' }).format(parsed);
+}
+
 function offsetDate(date: string, delta: number) {
   const parsed = new Date(`${date}T12:00:00-04:00`); parsed.setDate(parsed.getDate() + delta);
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(parsed);
 }
 
-function exportCsv(filename: string, headers: string[], rows: unknown[][]) {
-  const quote = (value: unknown) => { let text = String(value ?? ''); if (typeof value === 'string' && /^[=+@\-]/.test(text)) text = `'${text}`; return `"${text.replaceAll('"', '""')}"`; };
-  const content = '\ufeff' + [headers, ...rows].map(row => row.map(quote).join(',')).join('\r\n');
-  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
-  const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; anchor.click(); URL.revokeObjectURL(url);
-}
 
 function receiptMarkup(order: Order, business: string, logo: string, width: '58mm' | '80mm') {
   const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char);

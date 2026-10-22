@@ -2,9 +2,9 @@ import { collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, serverTimestam
 import { db } from './firebase';
 import { diffRecords, type SyncRecord } from './syncDiff';
 
-const arrays = ['products', 'customers', 'orders', 'expenses', 'incomes'] as const;
+const arrays = ['products', 'customers', 'orders', 'expenses', 'incomes', 'incomeDeductions'] as const;
 type Bucket = typeof arrays[number];
-type CloudData = { products: unknown[]; customers: unknown[]; orders: unknown[]; expenses: unknown[]; incomes: unknown[]; categories: string[]; business: string; businessLogoId?: string };
+type CloudData = { products: unknown[]; customers: unknown[]; orders: unknown[]; expenses: unknown[]; incomes: unknown[]; incomeDeductions: unknown[]; categories: string[]; incomeCategories: string[]; business: string; businessLogoId?: string };
 
 function rows(bucket: Bucket, values: unknown[]) {
   return values.flatMap((value, index) => {
@@ -45,6 +45,13 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
   if (categorySnapshot.empty) {
     await Promise.all(values.categories.map(name => setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() })));
   }
+  const incomeCategorySnapshot = await getDocs(collection(firestore, 'users', uid, 'incomeCategories'));
+  values.incomeCategories = incomeCategorySnapshot.empty
+    ? (Array.isArray(legacy.incomeCategories) ? legacy.incomeCategories as string[] : local.incomeCategories)
+    : incomeCategorySnapshot.docs.map(item => String(item.get('name')));
+  if (incomeCategorySnapshot.empty) {
+    await Promise.all(values.incomeCategories.map(name => setDoc(doc(firestore, 'users', uid, 'incomeCategories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() })));
+  }
   const businessRef = doc(firestore, 'users', uid, 'settings', 'business');
   const businessSnapshot = await getDoc(businessRef);
   values.business = businessSnapshot.exists() ? String(businessSnapshot.get('name') || '') : String(legacy.business || local.business);
@@ -62,6 +69,9 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
   unsubscribers.push(onSnapshot(collection(firestore, 'users', uid, 'categories'), snapshot => {
     onData({ categories: snapshot.docs.map(item => String(item.get('name'))) });
   }, () => onStatus(false)));
+  unsubscribers.push(onSnapshot(collection(firestore, 'users', uid, 'incomeCategories'), snapshot => {
+    onData({ incomeCategories: snapshot.docs.map(item => String(item.get('name'))) });
+  }, () => onStatus(false)));
   unsubscribers.push(onSnapshot(businessRef, snapshot => {
     if (snapshot.exists()) onData({ business: String(snapshot.get('name') || ''), businessLogoId: String(snapshot.get('logoImageId') || '') || undefined });
   }, () => onStatus(false)));
@@ -72,24 +82,35 @@ export async function hydrateOwnerData(uid: string, local: CloudData, onData: (v
 export async function persistOwnerData(uid: string, value: CloudData, previous: CloudData) {
   const firestore = db;
   if (!firestore) throw new Error('Firestore no está configurado.');
-  const writes: Promise<unknown>[] = [];
+  const batch = writeBatch(firestore);
+  let writeCount = 0;
   for (const bucket of arrays) {
     const delta = diffRecords(rows(bucket, previous[bucket]) as SyncRecord[], rows(bucket, value[bucket]) as SyncRecord[]);
-    for (const row of delta.upsert) writes.push(setDoc(doc(firestore, 'users', uid, bucket, row.id), { ...row, updatedAt: serverTimestamp() }));
-    for (const id of delta.remove) writes.push(deleteDoc(doc(firestore, 'users', uid, bucket, id)));
+    for (const row of delta.upsert) { batch.set(doc(firestore, 'users', uid, bucket, row.id), { ...row, updatedAt: serverTimestamp() }); writeCount++; }
+    for (const id of delta.remove) { batch.delete(doc(firestore, 'users', uid, bucket, id)); writeCount++; }
   }
   const oldCategories = new Set(previous.categories);
   const nextCategories = new Set(value.categories);
   for (const name of nextCategories) {
-    if (!oldCategories.has(name)) writes.push(setDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() }));
+    if (!oldCategories.has(name)) { batch.set(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() }); writeCount++; }
   }
   for (const name of oldCategories) {
-    if (!nextCategories.has(name)) writes.push(deleteDoc(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name))));
+    if (!nextCategories.has(name)) { batch.delete(doc(firestore, 'users', uid, 'categories', encodeURIComponent(name))); writeCount++; }
+  }
+  const oldIncomeCategories = new Set(previous.incomeCategories);
+  const nextIncomeCategories = new Set(value.incomeCategories);
+  for (const name of nextIncomeCategories) {
+    if (!oldIncomeCategories.has(name)) { batch.set(doc(firestore, 'users', uid, 'incomeCategories', encodeURIComponent(name)), { name, updatedAt: serverTimestamp() }); writeCount++; }
+  }
+  for (const name of oldIncomeCategories) {
+    if (!nextIncomeCategories.has(name)) { batch.delete(doc(firestore, 'users', uid, 'incomeCategories', encodeURIComponent(name))); writeCount++; }
   }
   if (value.business !== previous.business || value.businessLogoId !== previous.businessLogoId) {
-    writes.push(setDoc(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }));
+    batch.set(doc(firestore, 'users', uid, 'settings', 'business'), { name: value.business, ...(value.businessLogoId ? { logoImageId: value.businessLogoId } : {}), updatedAt: serverTimestamp() }); writeCount++;
   }
-  await Promise.all(writes);
+  if (!writeCount) return;
+  if (writeCount > 500) throw new Error('El cambio contiene demasiados registros para guardarse de forma segura.');
+  await batch.commit();
 }
 
 /** Remove a single owner record explicitly; persistOwnerData is intentionally additive. */

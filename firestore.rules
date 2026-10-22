@@ -25,13 +25,18 @@ service cloud.firestore {
         || ((bucket == 'expenses' || bucket == 'incomes')
           && data.amount is number && data.amount > 0
           && boundedText(data, 'category', 80) && data.date is string)
+        || (bucket == 'incomeDeductions' && boundedText(data, 'incomeId', 180)
+          && data.amount is number && data.amount > 0
+          && boundedText(data, 'note', 180) && data.date is string
+          && data.get('category', '') is string && data.get('category', '').size() <= 80
+          && data.get('expenseId', '') is string && data.get('expenseId', '').size() <= 180)
         || (bucket == 'devices' && boundedText(data, 'token', 4096)
           && boundedText(data, 'platform', 512));
     }
     function validRecord(bucket, recordId) {
       let data = request.resource.data;
       return data.updatedAt is timestamp && (
-        (bucket == 'categories' && boundedText(data, 'name', 80))
+        ((bucket == 'categories' || bucket == 'incomeCategories') && boundedText(data, 'name', 80))
         || (bucket == 'settings' && recordId == 'business'
           && boundedText(data, 'name', 120)
           && data.get('logoImageId', '') is string && data.get('logoImageId', '').size() <= 100)

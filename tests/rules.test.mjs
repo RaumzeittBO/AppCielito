@@ -30,6 +30,17 @@ test('Firestore permite solamente al UID propietario', async () => {
   await assertFails(setDoc(doc(owner, 'users/4iftAGoQawabSz1EEpKufdPQccC2/products/p2'), { ...valid, id: 'p2', price: -1 }));
 });
 
+test('Firestore permite ingresos manuales, categorías y deducciones válidas solo al propietario', async () => {
+  const owner = env.authenticatedContext(ownerUid).firestore();
+  const other = env.authenticatedContext('otra-cuenta').firestore();
+  const income = doc(owner, `users/${ownerUid}/incomes/income-1`);
+  await assertSucceeds(setDoc(income, { id: 'income-1', amount: 100, category: 'Venta adicional', date: '2026-10-22', note: 'Bebidas', source: 'manual', payments: [], updatedAt: serverTimestamp() }));
+  await assertSucceeds(setDoc(doc(owner, `users/${ownerUid}/incomeCategories/${encodeURIComponent('Venta adicional')}`), { name: 'Venta adicional', updatedAt: serverTimestamp() }));
+  await assertSucceeds(setDoc(doc(owner, `users/${ownerUid}/incomeDeductions/deduction-1`), { id: 'deduction-1', incomeId: 'manual:income-1', amount: 25, note: 'Compra de hielo', category: 'Insumos', date: '2026-10-22', expenseId: 'expense-1', updatedAt: serverTimestamp() }));
+  await assertFails(setDoc(doc(other, `users/${ownerUid}/incomeDeductions/forbidden`), { id: 'forbidden', incomeId: 'manual:income-1', amount: 1, note: 'No autorizado', date: '2026-10-22', updatedAt: serverTimestamp() }));
+  await assertFails(setDoc(doc(owner, `users/${ownerUid}/incomeDeductions/invalid`), { id: 'invalid', incomeId: 'manual:income-1', amount: -1, note: 'Monto inválido', date: '2026-10-22', updatedAt: serverTimestamp() }));
+});
+
 test('Firestore protege las imágenes y limita tipo, dimensiones y bytes', async () => {
   const owner = env.authenticatedContext(ownerUid).firestore();
   const other = env.authenticatedContext('otra-cuenta').firestore();
